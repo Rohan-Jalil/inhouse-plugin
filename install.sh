@@ -39,6 +39,16 @@ say() { echo "  $*"; }
 # Read one answer from the terminal. Never reads stdin: when this script is run
 # as `curl … | bash`, stdin is the script's own source and reading it would
 # swallow the rest of the script.
+ask_secret() { # ask_secret <prompt> -> echoes the answer, no echo to the terminal
+  if [ "$NONINTERACTIVE" = "1" ] || [ ! -r /dev/tty ]; then echo ""; return; fi
+  printf '  %s' "$1" > /dev/tty
+  stty -echo < /dev/tty 2>/dev/null || true
+  IFS= read -r _s < /dev/tty || _s=""
+  stty echo < /dev/tty 2>/dev/null || true
+  printf '\n' > /dev/tty
+  echo "$_s"
+}
+
 ask() { # ask <prompt> <default> -> echoes the answer
   _d="$2"
   if [ "$NONINTERACTIVE" = "1" ] || [ ! -r /dev/tty ]; then echo "$_d"; return; fi
@@ -84,6 +94,11 @@ if [ -z "$ENDPOINT" ]; then
   ENDPOINT="$(ask "Ingest endpoint URL: " "")"
 fi
 [ -n "$ENDPOINT" ] || die "An endpoint is required (--endpoint)."
+
+if [ -z "$TOKEN" ]; then
+  TOKEN="$(ask_secret 'Ingest token: ')"
+fi
+[ -n "$TOKEN" ] || die "An ingest token is required (--token). Without it the server rejects every report."
 
 case "$ENDPOINT" in
   https://*) ;;
@@ -142,26 +157,26 @@ say "plugin      inhouse-plugin@inhouse-plugin enabled"
 echo
 echo "Verifying the reporter can reach the server…"
 
-# Prefer a local checkout (running install.sh from the repo); otherwise use the
-# copy Claude Code just installed into its plugin cache.
-REPORTER=""
-HERE="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo /nonexistent)"
-if [ -f "$HERE/plugins/usage-tracker/scripts/report.mjs" ]; then
-  REPORTER="$HERE/plugins/usage-tracker/scripts/report.mjs"
-else
-  CACHE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache"
-  # Installed layout is cache/<marketplace>/<plugin>/<version>/scripts/report.mjs
-  REPORTER="$(find "$CACHE" -name report.mjs -path '*inhouse-plugin*' 2>/dev/null | head -1)"
-fi
+# Post a deliberately invalid body: the server answers 400 once authenticated
+# and 401 when the token is wrong, so this proves the token without writing a
+# session row.
+CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+  -X POST "$ENDPOINT" \
+  -H 'content-type: application/json' \
+  -H "authorization: Bearer $TOKEN" \
+  -d '{}' 2>/dev/null || echo 000)"
 
-if [ -z "$REPORTER" ]; then
-  echo "  Skipped: could not locate the installed reporter to test with."
-elif printf '{"session_id":"install-check","transcript_path":"/nonexistent","hook_event_name":"SessionStart"}' \
-   | CLAUDE_USAGE_DEBUG=1 "$NODE" "$REPORTER" 2>&1 | grep -q 'post failed'; then
-  echo "  WARNING: could not reach $ENDPOINT — reports will be spooled locally and retried." >&2
-else
-  echo "  OK."
-fi
+case "$CODE" in
+  400) echo "  OK — endpoint reachable and token accepted." ;;
+  401|403)
+    die "the server rejected this token (HTTP $CODE). Check --token against INGEST_TOKEN on the server." ;;
+  000)
+    echo "  WARNING: could not reach $ENDPOINT. Reports will be spooled locally and retried." >&2 ;;
+  404)
+    die "no ingest endpoint at $ENDPOINT (HTTP 404). Check the URL — it usually ends in /api/ingest." ;;
+  *)
+    echo "  WARNING: unexpected response from the server (HTTP $CODE)." >&2 ;;
+esac
 
 cat <<EOF
 

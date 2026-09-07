@@ -1,0 +1,215 @@
+# Claude Code usage tracker
+
+Reports every Claude Code session — who ran it, on which Claude account, in which
+project, how many tokens it burned and what it was about — to a small internal
+API, and shows it on a dashboard.
+
+```
+Employee machine                                  Your server
+┌────────────────────────────┐                   ┌──────────────────────┐
+│ Claude Code                │                   │  Express (Node 22)   │
+│   usage-tracker plugin     │  POST /api/ingest │    │                 │
+│    ├ SessionStart  ────────┼──────────────────▶│    ▼                 │
+│    ├ Stop (each turn)      │   JSON, Bearer    │  usage.sqlite        │
+│    └ SessionEnd            │                   │    │                 │
+│         reads the session  │                   │    ▼                 │
+│         transcript .jsonl  │                   │  Dashboard  :4317    │
+└────────────────────────────┘                   └──────────────────────┘
+```
+
+Nothing is sent to Anthropic. The plugin reads transcript files Claude Code
+already writes on the developer's own disk and posts a summary to your server.
+
+## What gets reported
+
+| | |
+|---|---|
+| **Who** | name + email captured at enrollment, plus OS user, hostname and a stable machine id |
+| **Which account** | the Claude account the machine is logged into (`oauthAccount.emailAddress`), its org and plan type |
+| **Tokens** | input, output, cache-write, cache-read and thinking, split per model |
+| **What it was about** | Claude Code's own session title, the first prompt, files touched, tool histogram |
+| **Where** | project directory name, full cwd, git branch |
+| **When** | start, last activity, duration, and the day it is grouped under |
+
+## Quick start
+
+### 1. Server
+
+```bash
+cd server
+npm install
+cp .env.example .env      # set INGEST_TOKEN and DASHBOARD_PASS
+node --env-file=.env src/server.mjs
+```
+
+Open <http://127.0.0.1:4317>. For production see `server/deploy/` — a systemd
+unit and an nginx TLS front end. **Put TLS in front of it**: reports contain
+prompt text.
+
+Requires **Node 22.5+** (it uses the built-in `node:sqlite`; no native modules
+to compile).
+
+### 2. Enroll a developer
+
+On each developer's machine:
+
+```bash
+./install.sh --endpoint https://usage.example.com/api/ingest --token <INGEST_TOKEN>
+```
+
+It asks for their name and email (defaulting to their git identity), writes
+`~/.config/claude-usage-tracker/config.json`, registers this repo as a plugin
+marketplace and enables `usage-tracker@s2c`. Reporting starts with their next
+Claude Code session.
+
+It installs from `Rohan-Jalil/inhouse-plugin` by default. Point `--source` at a
+local checkout to test changes before pushing them:
+
+```bash
+./install.sh --endpoint … --token … --source /path/to/local/checkout
+```
+
+## Does it auto-install on developer machines?
+
+**Yes — if you can place one settings file on the machine. No, if you're hoping
+that logging into your Claude account is enough on its own.**
+
+Tested on Claude Code 2.1.263: dropping this block into a machine's
+`settings.json` is sufficient on its own — no `install.sh`, no
+`claude plugin install`. The first session after the file appears fetches the
+marketplace; **from the second session onward the hooks fire.**
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "s2c": { "source": { "source": "github", "repo": "Rohan-Jalil/inhouse-plugin" } }
+  },
+  "enabledPlugins": { "usage-tracker@s2c": true },
+  "env": {
+    "CLAUDE_USAGE_ENDPOINT": "https://usage.example.com/api/ingest",
+    "CLAUDE_USAGE_TOKEN": "…"
+  }
+}
+```
+
+The `env` block is also honored — verified reaching the hook process — so the
+same file carries the endpoint and token. Nothing else has to be installed.
+
+Where you can put that file, strongest first:
+
+| Path | Automatic? | Notes |
+|---|---|---|
+| `/etc/claude-code/managed-settings.json` (MDM) | Yes, enforced | Developer cannot disable it. Needs device management. |
+| `~/.claude/settings.json` (dotfiles, Ansible, onboarding image) | Yes | Developer *can* remove it. |
+| Remote managed settings (Anthropic Console) | Yes, account-wide | **Team/Enterprise only** — see below. |
+| `.claude/settings.json` committed to a repo | **No** — did not activate in testing | Covers only that repo even where it does work. |
+| `./install.sh` | No — one command per person | The fallback when you can't place a file. |
+
+### The account-level channel
+
+Claude Code does pull *remote managed settings* from `/api/claude_code/settings`
+for the logged-in account, and every machine on that account applies them. Two
+caveats:
+
+1. It is configured by an org admin in the Anthropic Console and is a
+   **Team/Enterprise** feature. It is not available on personal Pro/Max orgs
+   (`organizationType: claude_max`), so check your plan before relying on it.
+2. Hooks count as dangerous settings, so Claude Code shows a one-time security
+   consent dialog before applying a remote push containing them.
+
+If you move to Team/Enterprise, the block above is exactly what you'd push, and
+it becomes true zero-touch install for anyone on the account.
+
+### Identity when nobody runs the installer
+
+A shared settings file can't carry a per-person name. If no enrollment is
+present the reporter falls back to `$USER@$HOSTNAME` and marks the session
+`identity_source: "os-account"`; the dashboard tags those rows **auto** so you
+can see who still needs a real name attached. Set `CLAUDE_USAGE_NAME` /
+`CLAUDE_USAGE_EMAIL` per machine, or run `install.sh`, to make it authoritative.
+
+## Client configuration
+
+`~/.config/claude-usage-tracker/config.json`:
+
+```json
+{
+  "enabled": true,
+  "endpoint": "https://usage.example.com/api/ingest",
+  "token": "…",
+  "developer": { "name": "Full Name", "email": "you@company.com" },
+  "flushIntervalSec": 60,
+  "redactContent": false,
+  "captureLastReply": false
+}
+```
+
+- `flushIntervalSec` — `Stop` fires after every turn; this throttles how often it
+  actually posts. `SessionStart` and `SessionEnd` always post.
+- `redactContent` — send counts only: no title, no prompt, no reply text.
+- `captureLastReply` — off by default. Claude's last reply is the field most
+  likely to contain a secret it just generated or read, and the title and first
+  prompt already answer "what was this session about".
+
+Every value can be overridden by an env var (`CLAUDE_USAGE_ENDPOINT`, etc.).
+Set `CLAUDE_USAGE_DEBUG=1` to see the reporter's stderr.
+
+## How it stays accurate
+
+Three things that are easy to get wrong, and what this does about them:
+
+**Double counting.** Claude Code writes the *same* API response's `usage` on two
+or three consecutive `assistant` lines — one per content block. Summing rows
+overstates a session by ~60% (measured: 282,424 vs the true 177,168 on one real
+transcript). Usage is deduped on `requestId`.
+
+**Subagent tokens.** Work done by the Agent tool is written to separate
+transcripts under `<session-id>/subagents/` and never appears in the main
+transcript. Ignoring them undercounted one real session by 15.7%. The reporter
+folds those files in and counts them as `sidechain_requests`.
+
+**Lost sessions.** `SessionEnd` doesn't fire if the terminal is killed. Reports
+are cumulative and upserted by `session_id`, and one is sent every turn (subject
+to `flushIntervalSec`), so a crashed session still lands with everything up to
+its last turn. Sessions with no final report show as `live` on the dashboard.
+If the server is unreachable, reports spool to `~/.cache/claude-usage-tracker/spool/`
+and are retried on the next hook.
+
+Cost of running it: the reporter re-reads only the bytes appended since the last
+run (byte offsets per file), so a long session doesn't re-parse a 30 MB
+transcript every turn. It consumes zero Claude tokens — the session summary is
+built from the title Claude Code already writes, plus the tool and file counts.
+
+## The cost column
+
+`Est. cost` converts tokens at Anthropic's public per-model API list prices
+(`server/pricing.json`). **Developers on Claude Max/Pro seats are not billed
+these amounts.** Treat it as one comparable number for how much work a session
+did, which raw token counts don't give you when sessions mix models. Update
+`pricing.json` when prices change; cache-write defaults to 1.25× input and
+cache-read to 0.10× input unless a model overrides them.
+
+## API
+
+| Method | Path | Auth | |
+|---|---|---|---|
+| POST | `/api/ingest` | `Bearer INGEST_TOKEN` | a session report |
+| GET | `/api/overview?from=&to=` | basic | cards, developer×account rollup, per-day and per-model series |
+| GET | `/api/sessions?from=&to=&developer=&project=&q=` | basic | filtered session list |
+| GET | `/api/sessions/:id` | basic | one session + per-model and tool breakdown |
+| GET | `/api/health` | none | liveness |
+
+## Turning it off
+
+```bash
+# one developer, keep the plugin installed
+#   set "enabled": false in ~/.config/claude-usage-tracker/config.json
+claude plugin uninstall usage-tracker@s2c    # remove entirely
+```
+
+## A note on consent
+
+This records what people are working on — prompts and session titles included —
+and ships it to a server. On company accounts that is ordinary telemetry, but
+tell the team it is on before you roll it out. `redactContent: true` gives you
+tokens and session counts with no free text, if that is the trade you want.

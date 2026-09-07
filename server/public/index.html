@@ -1,0 +1,572 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claude Usage</title>
+<style>
+:root {
+  color-scheme: light;
+  --surface-0: #f4f4f1;
+  --surface-1: #fcfcfb;
+  --surface-2: #efeeea;
+  --border:    #e3e2dd;
+  --border-strong: #d2d1ca;
+  --text-primary:   #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted:     #7c7b73;
+  --grid: #e9e8e3;
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100;
+  --series-5: #e87ba4; --series-6: #008300; --series-7: #4a3aa7; --series-8: #e34948;
+  --good: #0ca30c; --warning: #fab219;
+  --radius: 10px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --surface-0: #101010;
+    --surface-1: #1a1a19;
+    --surface-2: #232322;
+    --border:    #302f2c;
+    --border-strong: #45443f;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #8f8e85;
+    --grid: #2a2a27;
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+    --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-0: #101010; --surface-1: #1a1a19; --surface-2: #232322;
+  --border: #302f2c; --border-strong: #45443f;
+  --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8f8e85;
+  --grid: #2a2a27;
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+  --series-5: #d55181; --series-6: #008300; --series-7: #9085e9; --series-8: #e66767;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--surface-0); color: var(--text-primary);
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1360px; margin: 0 auto; padding: 24px 20px 64px; }
+
+header.top { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; justify-content: space-between; margin-bottom: 20px; }
+h1 { font-size: 20px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+.sub { color: var(--text-muted); font-size: 12.5px; margin-top: 3px; }
+
+/* filters live in one row above the charts */
+.filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.filters input, .filters select, .filters button {
+  font: inherit; font-size: 13px; color: var(--text-primary);
+  background: var(--surface-1); border: 1px solid var(--border-strong);
+  border-radius: 7px; padding: 6px 9px;
+}
+.filters input[type=search] { min-width: 200px; }
+.filters button { cursor: pointer; }
+.filters button:hover { background: var(--surface-2); }
+.filters button.on { background: var(--series-1); border-color: var(--series-1); color: #fff; }
+.filters .sep { width: 1px; height: 22px; background: var(--border-strong); margin: 0 2px; }
+
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+.tile .label { font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
+.tile .value { font-size: 27px; font-weight: 620; letter-spacing: -0.02em; margin-top: 5px; font-variant-numeric: tabular-nums; }
+.tile .foot { font-size: 12px; color: var(--text-secondary); margin-top: 3px; }
+
+.grid2 { display: grid; grid-template-columns: 1.45fr 1fr; gap: 12px; margin-bottom: 16px; }
+@media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius); padding: 15px 16px 12px; }
+.card h2 { font-size: 13.5px; font-weight: 620; margin: 0 0 2px; }
+.card .hint { font-size: 12px; color: var(--text-muted); margin: 0 0 12px; }
+
+svg { display: block; width: 100%; overflow: visible; }
+.grid-line { stroke: var(--grid); stroke-width: 1; }
+.axis-text { fill: var(--text-muted); font-size: 10.5px; }
+.bar { transition: opacity .12s; }
+.bar:hover { opacity: .78; }
+.bar-label { fill: var(--text-secondary); font-size: 11px; font-variant-numeric: tabular-nums; }
+.mark-name { fill: var(--text-primary); font-size: 12px; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 10px; font-size: 12px; color: var(--text-secondary); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.swatch { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+
+.tablecard { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 16px; overflow: hidden; }
+.tablecard > .head { padding: 14px 16px 10px; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.tablecard h2 { font-size: 13.5px; font-weight: 620; margin: 0; }
+.tablecard .hint { font-size: 12px; color: var(--text-muted); margin: 2px 0 0; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 8px 12px; border-top: 1px solid var(--border); white-space: nowrap; }
+th { font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); font-weight: 600; background: var(--surface-2); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr:hover { background: var(--surface-2); }
+td.wrap-cell { white-space: normal; max-width: 460px; color: var(--text-secondary); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.dev { font-weight: 560; color: var(--text-primary); }
+.pill { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; border: 1px solid var(--border-strong); color: var(--text-secondary); }
+.pill.live { border-color: var(--good); color: var(--good); }
+.pill.warn { border-color: var(--warning); color: var(--warning); margin-left: 6px; }
+.row-click { cursor: pointer; }
+.detail td { background: var(--surface-2); white-space: normal; }
+.detail .kv { display: grid; grid-template-columns: 140px 1fr; gap: 3px 14px; font-size: 12.5px; }
+.detail .kv dt { color: var(--text-muted); }
+.detail .kv dd { margin: 0; color: var(--text-primary); word-break: break-word; }
+
+#tip {
+  position: fixed; pointer-events: none; opacity: 0; transition: opacity .1s;
+  background: var(--surface-1); border: 1px solid var(--border-strong); border-radius: 7px;
+  padding: 7px 10px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.14); z-index: 50;
+  max-width: 260px;
+}
+#tip b { font-weight: 600; }
+#tip .t-row { display: flex; justify-content: space-between; gap: 14px; color: var(--text-secondary); }
+#tip .t-row span:last-child { font-variant-numeric: tabular-nums; color: var(--text-primary); }
+.empty { padding: 26px 16px; color: var(--text-muted); font-size: 13px; text-align: center; }
+.note { font-size: 12px; color: var(--text-muted); margin-top: 14px; line-height: 1.6; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <div>
+      <h1>Claude Code usage</h1>
+      <div class="sub" id="range-sub">Loading…</div>
+    </div>
+    <div class="filters">
+      <button data-days="1">Today</button>
+      <button data-days="7">7d</button>
+      <button data-days="14" class="on">14d</button>
+      <button data-days="30">30d</button>
+      <span class="sep"></span>
+      <input type="date" id="from" aria-label="From date">
+      <input type="date" id="to" aria-label="To date">
+      <span class="sep"></span>
+      <select id="dev-filter" aria-label="Filter by developer"><option value="">All developers</option></select>
+      <input type="search" id="q" placeholder="Search sessions…" aria-label="Search sessions">
+    </div>
+  </header>
+
+  <div class="tiles" id="tiles"></div>
+
+  <div class="grid2">
+    <div class="card">
+      <h2>Sessions per day</h2>
+      <p class="hint">One bar per day. Hover for tokens and cost.</p>
+      <div id="chart-days"></div>
+    </div>
+    <div class="card">
+      <h2>Tokens by model</h2>
+      <p class="hint">Includes cache reads and writes.</p>
+      <div id="chart-models"></div>
+      <div class="legend" id="model-legend"></div>
+    </div>
+  </div>
+
+  <div class="tablecard">
+    <div class="head">
+      <div>
+        <h2>Developers &amp; Claude accounts</h2>
+        <p class="hint">Who used which account, and what it cost.</p>
+      </div>
+    </div>
+    <div class="scroll"><table id="dev-table"></table></div>
+  </div>
+
+  <div class="tablecard">
+    <div class="head">
+      <div>
+        <h2>Sessions</h2>
+        <p class="hint">Click a row for the full breakdown.</p>
+      </div>
+      <div class="hint" id="session-count"></div>
+    </div>
+    <div class="scroll"><table id="session-table"></table></div>
+  </div>
+
+  <p class="note">
+    <b>Est. cost</b> converts tokens at Anthropic's public per-model API list price. Developers on Claude
+    Max/Pro seats are not billed these amounts — treat it as a comparable measure of how much work a
+    session did, not an invoice. Days are grouped in the server's reporting timezone
+    (<span id="tz">—</span>).
+  </p>
+</div>
+
+<div id="tip" role="tooltip"></div>
+
+<script>
+const SERIES = ['--series-1','--series-2','--series-3','--series-4','--series-5','--series-6','--series-7','--series-8'];
+const cssVar = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+const state = { from: '', to: '', dev: '', q: '', open: null };
+
+/* ------------------------------------------------------------- formatting */
+const nf = new Intl.NumberFormat('en-US');
+function tokens(n) {
+  n = Number(n) || 0;
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 1 : 2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'K';
+  return nf.format(n);
+}
+function money(n) {
+  n = Number(n) || 0;
+  if (n >= 1000) return '$' + nf.format(Math.round(n));
+  if (n >= 1) return '$' + n.toFixed(2);
+  return '$' + n.toFixed(n >= 0.01 ? 3 : 4);
+}
+function dur(sec) {
+  sec = Number(sec) || 0;
+  if (sec < 60) return sec + 's';
+  if (sec < 3600) return Math.round(sec / 60) + 'm';
+  const h = Math.floor(sec / 3600);
+  return h + 'h ' + Math.round((sec % 3600) / 60) + 'm';
+}
+const when = (iso) => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '—'
+    : d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+};
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+/* ---------------------------------------------------------------- tooltip */
+const tip = document.getElementById('tip');
+function showTip(evt, html) {
+  tip.innerHTML = html;
+  tip.style.opacity = '1';
+  const r = tip.getBoundingClientRect();
+  let x = evt.clientX + 14, y = evt.clientY - r.height - 10;
+  if (x + r.width > innerWidth - 8) x = evt.clientX - r.width - 14;
+  if (y < 8) y = evt.clientY + 18;
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+}
+const hideTip = () => { tip.style.opacity = '0'; };
+
+/* ----------------------------------------------------------------- charts */
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function el(name, attrs = {}, parent) {
+  const n = document.createElementNS(SVG_NS, name);
+  for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+  if (parent) parent.appendChild(n);
+  return n;
+}
+/** Bar with 4px rounded ends away from the baseline. */
+function barPath(x, y, w, h, r) {
+  r = Math.max(0, Math.min(r, w / 2, h));
+  if (h <= 0.5) return `M${x} ${y + h}h${w}`;
+  return `M${x} ${y + h}V${y + r}a${r} ${r} 0 0 1 ${r} ${-r}h${w - 2 * r}a${r} ${r} 0 0 1 ${r} ${r}V${y + h}Z`;
+}
+function niceMax(v) {
+  if (v <= 0) return 1;
+  const mag = Math.pow(10, Math.floor(Math.log10(v)));
+  for (const s of [1, 1.5, 2, 2.5, 3, 4, 5, 7.5, 10]) if (v <= s * mag) return s * mag;
+  return 10 * mag;
+}
+
+function drawDays(host, days) {
+  host.innerHTML = '';
+  if (!days.length) { host.innerHTML = '<div class="empty">No sessions in this range.</div>'; return; }
+
+  const W = host.clientWidth || 640, H = 210;
+  const m = { t: 10, r: 8, b: 26, l: 34 };
+  const iw = Math.max(40, W - m.l - m.r), ih = H - m.t - m.b;
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img',
+    'aria-label': 'Sessions per day' }, host);
+
+  const max = niceMax(Math.max(...days.map((d) => d.sessions)));
+  const y = (v) => m.t + ih - (v / max) * ih;
+
+  // Recessive grid, 3 ticks.
+  for (let i = 0; i <= 3; i++) {
+    const v = (max / 3) * i;
+    el('line', { class: 'grid-line', x1: m.l, x2: m.l + iw, y1: y(v), y2: y(v) }, svg);
+    el('text', { class: 'axis-text', x: m.l - 7, y: y(v) + 3.5, 'text-anchor': 'end' }, svg)
+      .textContent = Math.round(v);
+  }
+
+  // 2px surface gap between adjacent bars.
+  const slot = iw / days.length;
+  const bw = Math.max(3, Math.min(46, slot - 2));
+  const color = cssVar('--series-1');
+
+  days.forEach((d, i) => {
+    const x = m.l + i * slot + (slot - bw) / 2;
+    const h = ih - (y(d.sessions) - m.t);
+    const p = el('path', { class: 'bar', d: barPath(x, y(d.sessions), bw, h, 4), fill: color }, svg);
+    p.addEventListener('mousemove', (e) => showTip(e,
+      `<b>${esc(d.day)}</b>
+       <div class="t-row"><span>Sessions</span><span>${d.sessions}</span></div>
+       <div class="t-row"><span>Tokens</span><span>${tokens(d.total_tokens)}</span></div>
+       <div class="t-row"><span>Est. cost</span><span>${money(d.cost_usd)}</span></div>
+       <div class="t-row"><span>Developers</span><span>${d.devs}</span></div>`));
+    p.addEventListener('mouseleave', hideTip);
+
+    // Label every day when they fit, else roughly every other.
+    const step = slot < 34 ? Math.ceil(34 / slot) : 1;
+    if (i % step === 0 || i === days.length - 1) {
+      el('text', { class: 'axis-text', x: x + bw / 2, y: H - 8, 'text-anchor': 'middle' }, svg)
+        .textContent = d.day.slice(5).replace('-', '/');
+    }
+  });
+}
+
+function drawModels(host, legendHost, models) {
+  host.innerHTML = ''; legendHost.innerHTML = '';
+  if (!models.length) { host.innerHTML = '<div class="empty">No model data yet.</div>'; return; }
+
+  // Fixed slot order, never cycled: past 8 models everything else folds to "Other".
+  let rows = models.slice(0, 7);
+  if (models.length > 7) {
+    const rest = models.slice(7);
+    rows.push({
+      model: `Other (${rest.length})`,
+      total_tokens: rest.reduce((a, r) => a + r.total_tokens, 0),
+      cost_usd: rest.reduce((a, r) => a + r.cost_usd, 0),
+      requests: rest.reduce((a, r) => a + r.requests, 0),
+    });
+  }
+
+  const W = host.clientWidth || 420;
+  const rowH = 30, H = rows.length * rowH + 8;
+  const labelW = Math.min(180, Math.max(90, W * 0.42));
+  const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, height: H, role: 'img',
+    'aria-label': 'Tokens by model' }, host);
+
+  const max = Math.max(...rows.map((r) => r.total_tokens)) || 1;
+  const trackW = Math.max(40, W - labelW - 62);
+
+  rows.forEach((r, i) => {
+    const y = i * rowH + 4;
+    const color = cssVar(SERIES[i % SERIES.length]);
+    const w = Math.max(2, (r.total_tokens / max) * trackW);
+
+    el('text', { class: 'mark-name', x: 0, y: y + 15, 'dominant-baseline': 'middle' }, svg)
+      .textContent = r.model.replace(/^claude-/, '');
+    const p = el('path', {
+      class: 'bar', fill: color,
+      d: `M${labelW} ${y + 5}h${w - 4}a4 4 0 0 1 4 4v6a4 4 0 0 1 -4 4h${-(w - 4)}Z`,
+    }, svg);
+    // Direct labels: the light-mode contrast relief for slots 3/4/5.
+    el('text', { class: 'bar-label', x: labelW + w + 8, y: y + 15, 'dominant-baseline': 'middle' }, svg)
+      .textContent = tokens(r.total_tokens);
+
+    p.addEventListener('mousemove', (e) => showTip(e,
+      `<b>${esc(r.model)}</b>
+       <div class="t-row"><span>Tokens</span><span>${tokens(r.total_tokens)}</span></div>
+       <div class="t-row"><span>Requests</span><span>${nf.format(r.requests)}</span></div>
+       <div class="t-row"><span>Est. cost</span><span>${money(r.cost_usd)}</span></div>`));
+    p.addEventListener('mouseleave', hideTip);
+  });
+
+  legendHost.innerHTML = rows.map((r, i) =>
+    `<span><i class="swatch" style="background:${cssVar(SERIES[i % SERIES.length])}"></i>${esc(r.model.replace(/^claude-/, ''))}</span>`
+  ).join('');
+}
+
+/* ------------------------------------------------------------------ tables */
+function devTable(rows) {
+  const t = document.getElementById('dev-table');
+  if (!rows.length) { t.innerHTML = '<tbody><tr><td class="empty">Nothing reported yet.</td></tr></tbody>'; return; }
+  t.innerHTML = `
+    <thead><tr>
+      <th>Developer</th><th>Claude account</th>
+      <th class="num">Sessions</th><th class="num">Active days</th>
+      <th class="num">Sessions/day</th><th class="num">Tokens</th>
+      <th class="num">Est. cost</th><th class="num">Machines</th><th>Last active</th>
+    </tr></thead>
+    <tbody>${rows.map((r) => `
+      <tr>
+        <td><span class="dev">${esc(r.developer_name || '—')}</span>
+            ${r.identity_source === 'os-account' ? '<span class="pill warn" title="Derived from the OS account — this person has not been enrolled with a real name and email">auto</span>' : ''}<br>
+            <span class="mono" style="color:var(--text-muted)">${esc(r.developer_email || 'unidentified')}</span></td>
+        <td class="mono">${esc(r.account_email || '—')}</td>
+        <td class="num">${nf.format(r.sessions)}</td>
+        <td class="num">${nf.format(r.active_days)}</td>
+        <td class="num">${(r.sessions / Math.max(1, r.active_days)).toFixed(1)}</td>
+        <td class="num">${tokens(r.total_tokens)}</td>
+        <td class="num">${money(r.cost_usd)}</td>
+        <td class="num">${r.machines > 1 ? `<span class="pill" title="More than one machine reported under this enrollment">${r.machines}</span>` : r.machines}</td>
+        <td>${when(r.last_seen)}</td>
+      </tr>`).join('')}
+    </tbody>`;
+}
+
+function sessionTable(rows) {
+  const t = document.getElementById('session-table');
+  if (!rows.length) { t.innerHTML = '<tbody><tr><td class="empty">No sessions match.</td></tr></tbody>'; return; }
+  t.innerHTML = `
+    <thead><tr>
+      <th>Started</th><th>Developer</th><th>Project</th><th>What the session was about</th>
+      <th class="num">Turns</th><th class="num">Tokens</th><th class="num">Est. cost</th><th class="num">Length</th><th></th>
+    </tr></thead>
+    <tbody>${rows.map((s) => `
+      <tr class="row-click" data-id="${esc(s.session_id)}">
+        <td>${when(s.started_at)}</td>
+        <td><span class="dev">${esc(s.developer_name || s.developer_email || '—')}</span></td>
+        <td>${esc(s.project_name || '—')}${s.git_branch ? `<br><span class="mono" style="color:var(--text-muted)">${esc(s.git_branch)}</span>` : ''}</td>
+        <td class="wrap-cell">${esc(s.headline || s.title || '—')}</td>
+        <td class="num">${nf.format(s.turns)}</td>
+        <td class="num">${tokens(s.total_tokens)}</td>
+        <td class="num">${money(s.cost_usd)}</td>
+        <td class="num">${dur(s.duration_sec)}</td>
+        <td>${s.is_final ? '' : '<span class="pill live">live</span>'}</td>
+      </tr>`).join('')}
+    </tbody>`;
+
+  t.querySelectorAll('tr.row-click').forEach((tr) => {
+    tr.addEventListener('click', () => toggleDetail(tr, tr.dataset.id));
+  });
+}
+
+async function toggleDetail(tr, id) {
+  const next = tr.nextElementSibling;
+  if (next && next.classList.contains('detail')) { next.remove(); return; }
+  tr.parentElement.querySelectorAll('tr.detail').forEach((d) => d.remove());
+
+  const row = document.createElement('tr');
+  row.className = 'detail';
+  row.innerHTML = `<td colspan="9">Loading…</td>`;
+  tr.after(row);
+
+  const r = await fetch(`/api/sessions/${encodeURIComponent(id)}`).then((x) => x.json()).catch(() => null);
+  if (!r || r.error) { row.innerHTML = '<td colspan="9">Could not load this session.</td>'; return; }
+
+  const s = r.session;
+  const tools = Object.entries(r.tools).sort((a, b) => b[1] - a[1])
+    .map(([n, c]) => `${esc(n)}×${c}`).join(', ') || '—';
+  const models = r.models.map((m) =>
+    `${esc(m.model)} — ${tokens(m.input_tokens + m.output_tokens + m.cache_creation_tokens + m.cache_read_tokens)} over ${nf.format(m.requests)} requests, ${money(m.cost_usd)}`
+  ).join('<br>') || '—';
+  const files = r.files.length ? r.files.map((f) => esc(f)).join('<br>') : '—';
+
+  row.innerHTML = `<td colspan="9"><dl class="kv">
+    <dt>Session</dt><dd class="mono">${esc(s.session_id)}</dd>
+    <dt>Machine</dt><dd class="mono">${esc(s.os_user)}@${esc(s.hostname)} · ${esc(s.platform)} · Claude Code ${esc(s.cc_version || '?')}</dd>
+    <dt>Claude account</dt><dd class="mono">${esc(s.account_email)}${s.account_org ? ` · ${esc(s.account_org)}` : ''}</dd>
+    <dt>Directory</dt><dd class="mono">${esc(s.project_cwd)}</dd>
+    <dt>First prompt</dt><dd>${esc(s.first_prompt) || '—'}</dd>
+    <dt>Last reply</dt><dd>${esc(s.last_assistant) || '—'}</dd>
+    <dt>Tokens</dt><dd>in ${tokens(s.input_tokens)} · out ${tokens(s.output_tokens)} · cache write ${tokens(s.cache_creation_tokens)} · cache read ${tokens(s.cache_read_tokens)} · thinking ${tokens(s.thinking_tokens)}</dd>
+    <dt>By model</dt><dd>${models}</dd>
+    <dt>Tools</dt><dd>${tools}</dd>
+    <dt>Files touched</dt><dd class="mono">${files}</dd>
+    <dt>Reports</dt><dd>${nf.format(s.report_count)} · ${s.is_final ? `ended (${esc(s.end_reason || 'end')})` : 'still open or ended without a final report'}</dd>
+  </dl></td>`;
+}
+
+/* -------------------------------------------------------------------- load */
+function qs() {
+  const p = new URLSearchParams({ from: state.from, to: state.to });
+  if (state.dev) p.set('developer', state.dev);
+  return p;
+}
+
+async function load() {
+  const overview = await fetch(`/api/overview?${qs()}`).then((r) => r.json());
+  const t = overview.totals;
+  document.getElementById('tz').textContent = overview.range.tz;
+  document.getElementById('range-sub').textContent =
+    `${overview.range.from} → ${overview.range.to} · ${overview.range.tz}`;
+
+  const dayCount = new Set(overview.byDay.map((d) => d.day)).size || 1;
+  document.getElementById('tiles').innerHTML = `
+    <div class="tile"><div class="label">Sessions</div><div class="value">${nf.format(t.sessions)}</div>
+      <div class="foot">${(t.sessions / dayCount).toFixed(1)} per active day</div></div>
+    <div class="tile"><div class="label">Tokens</div><div class="value">${tokens(t.total_tokens)}</div>
+      <div class="foot">${tokens(t.cache_read_tokens)} of it cache reads</div></div>
+    <div class="tile"><div class="label">Est. API cost</div><div class="value">${money(t.cost_usd)}</div>
+      <div class="foot">list price equivalent</div></div>
+    <div class="tile"><div class="label">Developers</div><div class="value">${nf.format(t.developers)}</div>
+      <div class="foot">on ${nf.format(t.accounts)} Claude account${t.accounts === 1 ? '' : 's'}</div></div>`;
+
+  // Roll the per-developer day rows up to one bar per day.
+  const perDay = new Map();
+  for (const r of overview.byDay) {
+    const d = perDay.get(r.day) || { day: r.day, sessions: 0, total_tokens: 0, cost_usd: 0, devs: 0 };
+    d.sessions += r.sessions; d.total_tokens += r.total_tokens; d.cost_usd += r.cost_usd; d.devs += 1;
+    perDay.set(r.day, d);
+  }
+  drawDays(document.getElementById('chart-days'), [...perDay.values()].sort((a, b) => a.day.localeCompare(b.day)));
+  drawModels(document.getElementById('chart-models'), document.getElementById('model-legend'), overview.byModel);
+  devTable(overview.byDeveloper);
+
+  // Keep the developer filter populated without clobbering the current choice.
+  const sel = document.getElementById('dev-filter');
+  const seen = new Map();
+  for (const r of overview.byDeveloper) if (r.developer_email) seen.set(r.developer_email, r.developer_name);
+  const want = ['<option value="">All developers</option>',
+    ...[...seen].map(([e, n]) => `<option value="${esc(e)}">${esc(n || e)}</option>`)].join('');
+  if (sel.innerHTML !== want) { sel.innerHTML = want; sel.value = state.dev; }
+
+  const p = qs();
+  if (state.q) p.set('q', state.q);
+  p.set('limit', '200');
+  const list = await fetch(`/api/sessions?${p}`).then((r) => r.json());
+  document.getElementById('session-count').textContent =
+    `${nf.format(list.sessions.length)} of ${nf.format(list.total)} shown`;
+  sessionTable(list.sessions);
+}
+
+/* ------------------------------------------------------------------ wiring */
+function setDays(n) {
+  const to = new Date();
+  const from = new Date(to.getTime() - (n - 1) * 86400000);
+  const iso = (d) => d.toISOString().slice(0, 10);
+  state.from = iso(from); state.to = iso(to);
+  document.getElementById('from').value = state.from;
+  document.getElementById('to').value = state.to;
+}
+
+document.querySelectorAll('.filters button[data-days]').forEach((b) => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('.filters button[data-days]').forEach((x) => x.classList.remove('on'));
+    b.classList.add('on');
+    setDays(Number(b.dataset.days));
+    load();
+  });
+});
+for (const id of ['from', 'to']) {
+  document.getElementById(id).addEventListener('change', (e) => {
+    state[id] = e.target.value;
+    document.querySelectorAll('.filters button[data-days]').forEach((x) => x.classList.remove('on'));
+    load();
+  });
+}
+document.getElementById('dev-filter').addEventListener('change', (e) => { state.dev = e.target.value; load(); });
+let qTimer;
+document.getElementById('q').addEventListener('input', (e) => {
+  clearTimeout(qTimer);
+  qTimer = setTimeout(() => { state.q = e.target.value.trim(); load(); }, 250);
+});
+
+let rTimer;
+addEventListener('resize', () => { clearTimeout(rTimer); rTimer = setTimeout(load, 200); });
+setInterval(load, 60000);
+
+// Honour ?from=&to=&developer=&q= so a filtered view can be linked to.
+const params = new URLSearchParams(location.search);
+const isDay = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v || '');
+if (isDay(params.get('from')) || isDay(params.get('to'))) {
+  const to = isDay(params.get('to')) ? params.get('to') : new Date().toISOString().slice(0, 10);
+  const from = isDay(params.get('from')) ? params.get('from') : to;
+  state.from = from; state.to = to;
+  document.getElementById('from').value = from;
+  document.getElementById('to').value = to;
+  document.querySelectorAll('.filters button[data-days]').forEach((x) => x.classList.remove('on'));
+} else {
+  setDays(14);
+}
+if (params.get('developer')) state.dev = params.get('developer').toLowerCase();
+if (params.get('q')) { state.q = params.get('q'); document.getElementById('q').value = state.q; }
+load();
+</script>
+</body>
+</html>

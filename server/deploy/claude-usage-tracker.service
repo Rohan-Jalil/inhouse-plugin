@@ -1,0 +1,24 @@
+# /etc/systemd/system/claude-usage-tracker.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now claude-usage-tracker
+[Unit]
+Description=Claude Code usage tracker
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/claude-usage-tracker/server
+EnvironmentFile=/opt/claude-usage-tracker/server/.env
+ExecStart=/usr/bin/env node src/server.mjs
+Restart=always
+RestartSec=3
+
+# The service only ever needs its own database directory.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/claude-usage-tracker
+
+[Install]
+WantedBy=multi-user.target

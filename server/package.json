@@ -1,0 +1,14 @@
+{
+  "name": "claude-usage-tracker-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Ingest API and dashboard for Claude Code usage across the team.",
+  "main": "src/server.mjs",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "dev": "node --watch src/server.mjs"
+  },
+  "engines": { "node": ">=22.5" },
+  "dependencies": { "express": "^4.21.2" }
+}

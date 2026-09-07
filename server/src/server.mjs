@@ -40,6 +40,9 @@ const COMMIT = (() => {
   } catch { return 'unknown'; }
 })();
 
+/** Process start time, so a restart is visible without reading the journal. */
+const STARTED_AT = new Date().toISOString();
+
 const TRUST_PROXY = process.env.TRUST_PROXY ?? '1';
 const INGEST_PER_MIN = Number(process.env.RATE_LIMIT_INGEST_PER_MIN || 600);
 const READ_PER_MIN = Number(process.env.RATE_LIMIT_READ_PER_MIN || 240);
@@ -343,7 +346,7 @@ app.get('/api/sessions/:id', readLimiter, requireDashboardAuth, (req, res) => {
 // Liveness only - deliberately does no database work, so it can't be used as a
 // free query amplifier. The row count moved to /api/stats, behind auth.
 app.get('/api/health', readLimiter, (_req, res) => {
-  res.json({ ok: true, commit: COMMIT, pricing_updated: pricing.updated, tz: TZ });
+  res.json({ ok: true, commit: COMMIT, started_at: STARTED_AT, pricing_updated: pricing.updated, tz: TZ });
 });
 
 app.get('/api/stats', readLimiter, requireDashboardAuth, (_req, res) => {

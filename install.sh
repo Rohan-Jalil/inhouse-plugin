@@ -150,7 +150,8 @@ if [ -f "$HERE/plugins/usage-tracker/scripts/report.mjs" ]; then
   REPORTER="$HERE/plugins/usage-tracker/scripts/report.mjs"
 else
   CACHE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache"
-  REPORTER="$(find "$CACHE" -path '*usage-tracker/scripts/report.mjs' 2>/dev/null | head -1)"
+  # Installed layout is cache/<marketplace>/<plugin>/<version>/scripts/report.mjs
+  REPORTER="$(find "$CACHE" -name report.mjs -path '*usage-tracker*' 2>/dev/null | head -1)"
 fi
 
 if [ -z "$REPORTER" ]; then

@@ -38,7 +38,6 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Get a short-lived SSH certificate via OIDC
-        id: cert
         run: |
           set -euo pipefail
 
@@ -88,31 +87,10 @@ jobs:
           HTTP=$(curl -sS --cacert /tmp/root_ca.crt -o /tmp/sign.json -w '%{http_code}' \
             -X POST "${CA_URL}/ssh/sign" -H 'content-type: application/json' -d "$REQ")
           MSG="$(jq -r '.message // empty' /tmp/sign.json 2>/dev/null | head -3)"
-
           if [ "$HTTP" != "200" ] && [ "$HTTP" != "201" ]; then
-            # This repo not being in the CA's allowlist is a known, expected
-            # state that CI cannot fix. The box pulls origin/main on a timer, so
-            # the commit still ships - fail soft here rather than reporting a
-            # broken pipeline for something already handled.
-            case "$MSG" in
-              *"unauthorized repository"*)
-                echo "signed=false" >> "$GITHUB_OUTPUT"
-                echo "::warning::Fast path unavailable: the CA has not authorised this repository yet, so no SSH certificate was issued. The commit will still deploy - the server pulls origin/main every 2 minutes. See deploy/step-ca/README.md for the one-line CA change that enables instant deploys."
-                {
-                  echo "### Deploy handed to the pull timer"
-                  echo
-                  echo "The CA declined to issue a certificate: \`$MSG\`"
-                  echo
-                  echo "This commit deploys within ~2 minutes via \`inhouse-plugin-deploy.timer\` on the host."
-                  echo "To get instant deploys, authorise this repo in \`REDACTED\` (needs root) - see \`deploy/step-ca/README.md\`."
-                } >> "$GITHUB_STEP_SUMMARY"
-                exit 0 ;;
-              *)
-                echo "::error::CA refused to sign (HTTP $HTTP): ${MSG:-no message}"
-                exit 1 ;;
-            esac
+            echo "::error::CA refused to sign (HTTP $HTTP): ${MSG:-no message}"
+            exit 1
           fi
-          echo "signed=true" >> "$GITHUB_OUTPUT"
 
           CERT="$(jq -r '.crt' /tmp/sign.json)"
           test -n "$CERT" && test "$CERT" != null \
@@ -124,7 +102,6 @@ jobs:
           ssh-keygen -L -f ~/.ssh/id_ed25519-cert.pub | grep -E 'Type|Valid|Principals|Key ID' -A1 | head -12
 
       - name: Deploy
-        if: steps.cert.outputs.signed == 'true'
         run: |
           set -euo pipefail
           ssh-keyscan -T 10 "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null

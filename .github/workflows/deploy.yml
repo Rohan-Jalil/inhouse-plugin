@@ -23,12 +23,16 @@ permissions:
   id-token: write
   contents: read
 
+# Deployment target lives in repository variables, not in this file - the repo
+# is public. Settings > Secrets and variables > Actions > Variables:
+#   CA_URL, CA_FINGERPRINT, CA_PROVISIONER, DEPLOY_HOST, DEPLOY_USER
+# None of these are secrets; the fingerprint is what pins the CA.
 env:
-  CA_URL: https://REDACTED_HOST:9443
-  CA_FINGERPRINT: REDACTED_FINGERPRINT
-  CA_PROVISIONER: github
-  DEPLOY_HOST: REDACTED_HOST
-  DEPLOY_USER: deploy
+  CA_URL: ${{ vars.CA_URL }}
+  CA_FINGERPRINT: ${{ vars.CA_FINGERPRINT }}
+  CA_PROVISIONER: ${{ vars.CA_PROVISIONER || 'github' }}
+  DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+  DEPLOY_USER: ${{ vars.DEPLOY_USER || 'deploy' }}
 
 jobs:
   deploy:
@@ -37,7 +41,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Not an error: the host also pulls origin/main on a timer, so a repo
+      # without a configured target still deploys. Skip rather than fail.
+      - name: Check the deploy target is configured
+        id: cfg
+        run: |
+          if [ -z "${CA_URL}" ] || [ -z "${CA_FINGERPRINT}" ] || [ -z "${DEPLOY_HOST}" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No deploy target configured (repository variables CA_URL, CA_FINGERPRINT, DEPLOY_HOST). The host pulls origin/main on a timer, so this commit still deploys."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Get a short-lived SSH certificate via OIDC
+        if: steps.cfg.outputs.configured == 'true'
         run: |
           set -euo pipefail
 
@@ -102,6 +119,7 @@ jobs:
           ssh-keygen -L -f ~/.ssh/id_ed25519-cert.pub | grep -E 'Type|Valid|Principals|Key ID' -A1 | head -12
 
       - name: Deploy
+        if: steps.cfg.outputs.configured == 'true'
         run: |
           set -euo pipefail
           ssh-keyscan -T 10 "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null

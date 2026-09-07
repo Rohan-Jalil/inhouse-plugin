@@ -207,6 +207,11 @@ const cssVar = (n) => getComputedStyle(document.documentElement).getPropertyValu
 
 const state = { from: '', to: '', dev: '', q: '', open: null };
 
+/* API calls are relative to wherever the page is served from, so the dashboard
+   works at / and equally under a sub-path like /usage/ behind a shared vhost. */
+const BASE = location.pathname.replace(/[^/]*$/, '');
+const api = (p) => BASE + p;
+
 /* ------------------------------------------------------------- formatting */
 const nf = new Intl.NumberFormat('en-US');
 function tokens(n) {
@@ -436,7 +441,7 @@ async function toggleDetail(tr, id) {
   row.innerHTML = `<td colspan="9">Loading…</td>`;
   tr.after(row);
 
-  const r = await fetch(`/api/sessions/${encodeURIComponent(id)}`).then((x) => x.json()).catch(() => null);
+  const r = await fetch(api(`api/sessions/${encodeURIComponent(id)}`)).then((x) => x.json()).catch(() => null);
   if (!r || r.error) { row.innerHTML = '<td colspan="9">Could not load this session.</td>'; return; }
 
   const s = r.session;
@@ -470,7 +475,7 @@ function qs() {
 }
 
 async function load() {
-  const overview = await fetch(`/api/overview?${qs()}`).then((r) => r.json());
+  const overview = await fetch(api(`api/overview?${qs()}`)).then((r) => r.json());
   const t = overview.totals;
   document.getElementById('tz').textContent = overview.range.tz;
   document.getElementById('range-sub').textContent =
@@ -509,7 +514,7 @@ async function load() {
   const p = qs();
   if (state.q) p.set('q', state.q);
   p.set('limit', '200');
-  const list = await fetch(`/api/sessions?${p}`).then((r) => r.json());
+  const list = await fetch(api(`api/sessions?${p}`)).then((r) => r.json());
   document.getElementById('session-count').textContent =
     `${nf.format(list.sessions.length)} of ${nf.format(list.total)} shown`;
   sessionTable(list.sessions);

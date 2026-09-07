@@ -16,6 +16,15 @@ echo "==> node $(node -v)"
 PREV="$(git -C "$APP" rev-parse HEAD)"
 
 git -C "$APP" fetch --quiet origin main
+TARGET="$(git -C "$APP" rev-parse origin/main)"
+
+# Nothing to do. Matters because a timer runs this on a schedule: without the
+# check every tick would reinstall and restart a healthy service.
+if [ "$PREV" = "$TARGET" ] && [ "${FORCE:-0}" != "1" ]; then
+  echo "==> already at ${PREV:0:7}, nothing to deploy"
+  exit 0
+fi
+
 git -C "$APP" reset --quiet --hard origin/main
 echo "==> ${PREV:0:7} -> $(git -C "$APP" rev-parse --short HEAD)  $(git -C "$APP" log -1 --format=%s)"
 

@@ -1,0 +1,10 @@
+[Unit]
+Description=Check origin/main for inhouse-plugin server changes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

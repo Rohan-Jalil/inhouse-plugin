@@ -1,0 +1,10 @@
+# Pull-based deploy: the box checks the repo itself, so nothing needs inbound
+# SSH, a CA certificate, or a stored credential. Install alongside the timer:
+#   ~/.config/systemd/user/
+[Unit]
+Description=Deploy inhouse-plugin server from origin/main
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/inhouse-plugin/deploy/server-deploy.sh

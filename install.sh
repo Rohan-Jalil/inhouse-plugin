@@ -78,6 +78,28 @@ say "node        $("$NODE" -v)  ($NODE)"
 command -v claude >/dev/null 2>&1 || die "The 'claude' CLI is not on PATH."
 say "claude      $(claude --version 2>/dev/null | head -1)"
 
+# Which config directory will Claude Code actually read? Installing into the
+# wrong one is silent: the plugin reports as installed, the hooks never load,
+# and no reports are ever sent. Honour CLAUDE_CONFIG_DIR when it is exported;
+# otherwise pick the most recently used candidate rather than assuming ~/.claude.
+if [ -z "${CLAUDE_CONFIG_DIR:-}" ]; then
+  NEWEST=""; NEWEST_T=0
+  for d in "$HOME"/.claude "$HOME"/.claude-*; do
+    [ -f "$d/.claude.json" ] || continue
+    for marker in "$d/history.jsonl" "$d/.claude.json"; do
+      [ -e "$marker" ] || continue
+      T=$(stat -c %Y "$marker" 2>/dev/null || echo 0)
+      [ "$T" -gt "$NEWEST_T" ] && { NEWEST_T=$T; NEWEST="$d"; }
+    done
+  done
+  if [ -n "$NEWEST" ] && [ "$NEWEST" != "$HOME/.claude" ]; then
+    export CLAUDE_CONFIG_DIR="$NEWEST"
+    say "config dir  $CLAUDE_CONFIG_DIR (detected — most recently used)"
+  fi
+fi
+CFG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+say "config dir  $CFG_DIR"
+
 # ------------------------------------------------------------------- identity
 if [ -z "$NAME" ]; then
   NAME="$(git config --global user.name 2>/dev/null || true)"
@@ -152,6 +174,12 @@ claude plugin install inhouse-plugin@inhouse-plugin >/dev/null 2>&1 \
   || claude plugin enable inhouse-plugin@inhouse-plugin >/dev/null 2>&1 \
   || die "Could not install inhouse-plugin@inhouse-plugin"
 say "plugin      inhouse-plugin@inhouse-plugin enabled"
+
+if ! grep -q 'inhouse-plugin@inhouse-plugin' "$CFG_DIR/plugins/installed_plugins.json" 2>/dev/null; then
+  die "the plugin did not install into $CFG_DIR, so Claude Code will not load it.
+       If you launch Claude Code with a different CLAUDE_CONFIG_DIR, re-run with:
+         CLAUDE_CONFIG_DIR=/path/to/dir $0 ..."
+fi
 
 # ------------------------------------------------------------------ verify
 echo

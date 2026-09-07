@@ -220,39 +220,57 @@ journalctl --user -u inhouse-plugin -f
 
 ### Auto-deploy
 
-Pushing to `main` with changes under `server/` or `deploy/` runs
-`.github/workflows/deploy.yml`, which SSHes in and pipes `deploy/server-deploy.sh`
-to the box. That script pulls, runs `npm ci`, restarts the unit, then polls
-`/api/health` for 20s — **and rolls back to the previous commit if the health
-check fails.**
+There are two paths. **The pull timer is what works today**; the push workflow
+is blocked on a CA change described below.
 
-**There are no repository secrets and no deploy key.** The host runs its own
-Smallstep CA (`step-ca` on `:9443`) which sshd trusts as an SSH user CA
-(`TrustedUserCAKeys`), and that CA already has a GitHub Actions OIDC
-provisioner:
+#### Pull (active)
+
+A systemd user timer on the box checks `origin/main` every two minutes and runs
+`deploy/server-deploy.sh` — the same script, with the same health check and
+rollback. It needs no inbound SSH, no certificate, no stored credential and no
+root, which is why it works while the push path does not.
+
+```bash
+systemctl --user list-timers inhouse-plugin-deploy.timer
+journalctl --user -u inhouse-plugin-deploy -f
+```
+
+The script exits early when the checkout already matches `origin/main`, so a
+tick on an unchanged repo costs one `git fetch` and nothing else. `FORCE=1`
+redeploys anyway.
+
+Units live in `deploy/systemd/` and install with:
+
+```bash
+install -m 644 deploy/systemd/inhouse-plugin-deploy.* ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now inhouse-plugin-deploy.timer
+```
+
+Trade-off against push: up to two minutes of delay, and the deploy result shows
+up in the box's journal rather than in the Actions UI.
+
+#### Push (blocked)
+
+`.github/workflows/deploy.yml` deploys within seconds of a push, authenticating
+with a short-lived SSH certificate from the host's `step-ca` in exchange for the
+run's GitHub OIDC token. **No repository secrets and no deploy key.**
 
 ```
 OIDC | github
   clientID : https://REDACTED_HOST:9443
   issuer   : https://token.actions.githubusercontent.com
-  ssh cert : 5 min default, 10 min max
+  ssh cert : 5 min default, 10 min max, renewal disabled
 ```
 
-So each run exchanges its GitHub OIDC token for an SSH certificate that lives
-for minutes and is bound to that workflow run. Nothing long-lived is stored in
-GitHub, and there is no key to leak or rotate.
+The workflow needs `permissions: id-token: write`. The CA's public parameters
+(URL, root fingerprint, provisioner) live in the workflow's `env:` block — they
+are not secrets; the fingerprint is what pins the CA against impersonation.
 
-The workflow needs `permissions: id-token: write` — without it GitHub issues no
-OIDC token and the run fails at the first step.
-
-The CA's public parameters live in the workflow's `env:` block (CA URL, root
-fingerprint, provisioner name). They are not secrets; the fingerprint is what
-pins the CA against impersonation.
-
-> A previous revision used a `DEPLOY_SSH_KEY` secret. That key
-> (`~/.ssh/github-actions-deploy` on the box) is no longer used — revoke it by
-> removing its line from `~/.ssh/authorized_keys`, and delete the
-> `DEPLOY_SSH_KEY`, `DEPLOY_HOST` and `DEPLOY_USER` repository secrets.
+> A previous revision used a `DEPLOY_SSH_KEY` secret. It is no longer used —
+> revoke it by removing `~/.ssh/github-actions-deploy.pub` from
+> `~/.ssh/authorized_keys`, and delete the `DEPLOY_SSH_KEY`, `DEPLOY_HOST` and
+> `DEPLOY_USER` repository secrets.
 
 #### One CA change is still needed
 

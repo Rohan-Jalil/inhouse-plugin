@@ -22,22 +22,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure SSH
+      - name: Deploy
         env:
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
         run: |
-          test -n "$DEPLOY_SSH_KEY" || { echo "::error::DEPLOY_SSH_KEY secret is not set"; exit 1; }
-          test -n "$DEPLOY_HOST"    || { echo "::error::DEPLOY_HOST secret is not set"; exit 1; }
+          set -euo pipefail
+
+          # Secrets are pasted by hand, so strip whitespace/newlines and strip a
+          # scheme or user@ prefix if one crept in. Never echo the values.
+          host="$(printf '%s' "${DEPLOY_HOST:-}" | tr -d '[:space:]')"
+          host="${host#*://}"
+          host="${host#*@}"
+          host="${host%%/*}"
+          host="${host%%:*}"
+          user="$(printf '%s' "${DEPLOY_USER:-deploy}" | tr -d '[:space:]')"
+
+          if [ -z "$host" ]; then
+            echo "::error::DEPLOY_HOST secret is empty or unset"; exit 1
+          fi
+          if ! printf '%s' "$host" | grep -qE '^[A-Za-z0-9._-]+$'; then
+            echo "::error::DEPLOY_HOST is not a bare hostname or IP after cleanup (length ${#host}). Set it to just the address, e.g. 203.0.113.10 — no scheme, port, user@, or quotes."
+            exit 1
+          fi
+          if [ -z "${DEPLOY_SSH_KEY:-}" ]; then
+            echo "::error::DEPLOY_SSH_KEY secret is empty or unset"; exit 1
+          fi
+          echo "target resolved (host length ${#host}, user length ${#user})"
+
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          # A key pasted with literal \n instead of real newlines is the other
+          # common paste error - fail with a clear message rather than a vague
+          # "invalid format" from ssh.
+          if ! ssh-keygen -y -f ~/.ssh/id_ed25519 >/dev/null 2>&1; then
+            echo "::error::DEPLOY_SSH_KEY is not a valid private key. Paste the whole file including the BEGIN/END lines and real line breaks."
+            exit 1
+          fi
 
-      - name: Deploy
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-        run: |
+          ssh-keyscan -T 10 "$host" >> ~/.ssh/known_hosts 2>/dev/null
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            "${DEPLOY_USER:-deploy}@${DEPLOY_HOST}" 'bash -s' < deploy/server-deploy.sh
+            "${user}@${host}" 'bash -s' < deploy/server-deploy.sh

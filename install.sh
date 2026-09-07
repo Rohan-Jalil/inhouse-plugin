@@ -157,26 +157,34 @@ say "plugin      inhouse-plugin@inhouse-plugin enabled"
 echo
 echo "Verifying the reporter can reach the server…"
 
-# Post a deliberately invalid body: the server answers 400 once authenticated
-# and 401 when the token is wrong, so this proves the token without writing a
-# session row.
-CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
-  -X POST "$ENDPOINT" \
-  -H 'content-type: application/json' \
-  -H "authorization: Bearer $TOKEN" \
-  -d '{}' 2>/dev/null || echo 000)"
-
-case "$CODE" in
-  400) echo "  OK — endpoint reachable and token accepted." ;;
-  401|403)
-    die "the server rejected this token (HTTP $CODE). Check --token against INGEST_TOKEN on the server." ;;
-  000)
-    echo "  WARNING: could not reach $ENDPOINT. Reports will be spooled locally and retried." >&2 ;;
-  404)
-    die "no ingest endpoint at $ENDPOINT (HTTP 404). Check the URL — it usually ends in /api/ingest." ;;
+# 1. Confirm the URL points at this app at all. Another service on the same
+#    host may answer 401 to anything, which would otherwise look like a bad
+#    token and send people hunting for the wrong problem.
+HEALTH="${ENDPOINT%/ingest}/health"
+HBODY="$(curl -s --max-time 10 "$HEALTH" 2>/dev/null || true)"
+case "$HBODY" in
+  *'"ok":true'*) echo "  Endpoint identified: $(echo "$HBODY" | sed -n 's/.*"commit":"\([^"]*\)".*/commit \1/p')" ;;
+  "")
+    echo "  WARNING: could not reach $HEALTH. Reports will be spooled locally and retried." >&2 ;;
   *)
-    echo "  WARNING: unexpected response from the server (HTTP $CODE)." >&2 ;;
+    die "$ENDPOINT is not the usage tracker — $HEALTH did not identify it.
+       Something else is serving that path. Check the URL, including any prefix such as /usage." ;;
 esac
+
+# 2. Now the token. A deliberately invalid body gets 400 once authenticated and
+#    401 when the token is wrong, proving the credential without writing a row.
+if [ -n "$HBODY" ]; then
+  CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+    -X POST "$ENDPOINT" \
+    -H 'content-type: application/json' \
+    -H "authorization: Bearer $TOKEN" \
+    -d '{}' 2>/dev/null || echo 000)"
+  case "$CODE" in
+    400) echo "  OK — endpoint reachable and token accepted." ;;
+    401|403) die "the server rejected this token (HTTP $CODE). Check --token against INGEST_TOKEN on the server." ;;
+    *) echo "  WARNING: unexpected response from the ingest endpoint (HTTP $CODE)." >&2 ;;
+  esac
+fi
 
 cat <<EOF
 

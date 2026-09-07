@@ -37,64 +37,62 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install step CLI
-        run: |
-          set -euo pipefail
-          curl -fsSL -o /tmp/step.tar.gz \
-            https://dl.smallstep.com/cli/docs-cli-install/latest/step_linux_amd64.tar.gz
-          tar -xzf /tmp/step.tar.gz -C /tmp
-          sudo install -m 0755 "$(find /tmp -type f -name step -perm -u+x | head -1)" /usr/local/bin/step
-          step version
-
       - name: Get a short-lived SSH certificate via OIDC
         run: |
           set -euo pipefail
-          # The audience must match the provisioner's clientID on the CA.
+
+          # Fetch the CA root and pin it by fingerprint, so everything below
+          # talks to a verified CA without trusting the runner's trust store.
+          curl -fsSk "${CA_URL}/roots" | jq -r '.crts[0]' > /tmp/root_ca.crt
+          GOT="$(openssl x509 -in /tmp/root_ca.crt -outform DER \
+                 | openssl dgst -sha256 -hex | awk '{print $NF}')"
+          if [ "$GOT" != "$CA_FINGERPRINT" ]; then
+            echo "::error::CA root fingerprint mismatch. expected $CA_FINGERPRINT got $GOT"
+            exit 1
+          fi
+          echo "CA root verified against pinned fingerprint"
+
+          # GitHub's OIDC token for this run, with the audience the CA's
+          # provisioner expects.
           ID_TOKEN="$(curl -fsSL \
             -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${CA_URL}" | jq -r '.value')"
           test -n "$ID_TOKEN" && test "$ID_TOKEN" != null \
             || { echo "::error::No OIDC token returned. Is 'permissions: id-token: write' set?"; exit 1; }
 
-          step ca bootstrap --ca-url "$CA_URL" --fingerprint "$CA_FINGERPRINT" --force
-
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          ssh-keygen -q -t ed25519 -N '' -C "github-actions-$GITHUB_RUN_ID" -f ~/.ssh/id_ed25519
 
-          # Pass the CA explicitly. step's flags also read environment
-          # variables, and on a GitHub runner it otherwise picks up GITHUB_SHA
-          # as the root fingerprint and fails looking for a root that does not
-          # exist. env -u keeps that variable out of step's view entirely.
-          env -u GITHUB_SHA -u SHA step ssh certificate \
-            --ca-url "$CA_URL" \
-            --root "$HOME/.step/certs/root_ca.crt" \
-            --provisioner "$CA_PROVISIONER" \
-            --token "$ID_TOKEN" \
-            --insecure --no-password --force \
-            "$DEPLOY_USER" ~/.ssh/id_ecdsa \
-          || {
-            echo "--- defaults.json written by bootstrap"
-            cat "$HOME/.step/config/defaults.json" 2>/dev/null || true
-            echo
-            echo "--- actual fingerprint of the downloaded root"
-            step certificate fingerprint "$HOME/.step/certs/root_ca.crt" || true
-            echo "--- expected"
-            echo "$CA_FINGERPRINT"
-            echo "--- retry with STEPDEBUG=1"
-            STEPDEBUG=1 step ssh certificate \
-              --ca-url "$CA_URL" --root "$HOME/.step/certs/root_ca.crt" \
-              --provisioner "$CA_PROVISIONER" --token "$ID_TOKEN" \
-              --insecure --no-password --force \
-              "$DEPLOY_USER" ~/.ssh/id_ecdsa 2>&1 | tail -40 || true
+          # Call the CA's SSH sign endpoint directly rather than via `step ssh
+          # certificate`. The CLI treats --token as one of its own bootstrap
+          # tokens and reads the root fingerprint from the token's "sha" claim;
+          # a GitHub OIDC token carries "sha" = the commit SHA, so the CLI looks
+          # for a root that does not exist and fails. The HTTP API has no such
+          # ambiguity.
+          PUBKEY="$(awk '{print $2}' ~/.ssh/id_ed25519.pub)"
+          REQ="$(jq -cn --arg pk "$PUBKEY" --arg ott "$ID_TOKEN" \
+                 '{publicKey:$pk, ott:$ott, certType:"user"}')"
+
+          HTTP=$(curl -sS --cacert /tmp/root_ca.crt -o /tmp/sign.json -w '%{http_code}' \
+            -X POST "${CA_URL}/ssh/sign" -H 'content-type: application/json' -d "$REQ")
+          if [ "$HTTP" != "200" ] && [ "$HTTP" != "201" ]; then
+            echo "::error::CA refused to sign (HTTP $HTTP): $(jq -r '.message // .' /tmp/sign.json 2>/dev/null | head -3)"
             exit 1
-          }
+          fi
+
+          CERT="$(jq -r '.crt' /tmp/sign.json)"
+          test -n "$CERT" && test "$CERT" != null \
+            || { echo "::error::CA response had no certificate: $(head -c 300 /tmp/sign.json)"; exit 1; }
+          printf 'ssh-ed25519-cert-v01@openssh.com %s github-actions\n' "$CERT" > ~/.ssh/id_ed25519-cert.pub
+          chmod 600 ~/.ssh/id_ed25519 ~/.ssh/id_ed25519-cert.pub
 
           echo "--- certificate issued:"
-          ssh-keygen -L -f ~/.ssh/id_ecdsa-cert.pub | sed -n '1,12p'
+          ssh-keygen -L -f ~/.ssh/id_ed25519-cert.pub | grep -E 'Type|Valid|Principals|Key ID' -A1 | head -12
 
       - name: Deploy
         run: |
           set -euo pipefail
           ssh-keyscan -T 10 "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            -i ~/.ssh/id_ecdsa \
+            -i ~/.ssh/id_ed25519 \
             "${DEPLOY_USER}@${DEPLOY_HOST}" 'bash -s' < deploy/server-deploy.sh

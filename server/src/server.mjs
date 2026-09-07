@@ -30,10 +30,17 @@ const db = openDb(DB_FILE);
 const store = makeStore(db);
 const pricing = loadPricing(path.join(ROOT, 'pricing.json'));
 
+const TRUST_PROXY = process.env.TRUST_PROXY ?? '1';
+const INGEST_PER_MIN = Number(process.env.RATE_LIMIT_INGEST_PER_MIN || 600);
+const READ_PER_MIN = Number(process.env.RATE_LIMIT_READ_PER_MIN || 240);
+
 const app = express();
 app.disable('x-powered-by');
-app.set('trust proxy', true);
-app.use(express.json({ limit: '2mb' }));
+// Number of proxy hops to trust for the client IP. Trusting *every* hop would
+// let a caller spoof X-Forwarded-For and walk straight past the rate limiter.
+app.set('trust proxy', /^\d+$/.test(TRUST_PROXY) ? Number(TRUST_PROXY) : TRUST_PROXY);
+// NOTE: no global body parser. JSON is parsed per-route, *after* auth, so an
+// unauthenticated flood is rejected before the server parses anything.
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -48,6 +55,39 @@ const toDay = (iso) => {
 
 const int = (v) => (Number.isFinite(Number(v)) ? Math.max(0, Math.trunc(Number(v))) : 0);
 const str = (v, max = 500) => (typeof v === 'string' ? v.slice(0, max) : '');
+
+/**
+ * Fixed-window per-IP rate limit. In-process and dependency-free: this is a
+ * cheap first line that keeps a flood from reaching auth, JSON parsing or
+ * SQLite. It is not a substitute for a real edge (see README) - a distributed
+ * flood needs Cloudflare, an IP allowlist, or a VPN.
+ */
+function rateLimit({ perMin, name }) {
+  const windowMs = 60_000;
+  const hits = new Map();
+  return (req, res, next) => {
+    const now = Date.now();
+    // Bound memory: drop the whole table once a window's worth of IPs is stale.
+    if (hits.size > 10_000) {
+      for (const [k, v] of hits) if (v.resetAt <= now) hits.delete(k);
+      if (hits.size > 10_000) hits.clear();
+    }
+    const ip = req.ip || 'unknown';
+    let e = hits.get(ip);
+    if (!e || e.resetAt <= now) { e = { count: 0, resetAt: now + windowMs }; hits.set(ip, e); }
+    e.count += 1;
+    if (e.count > perMin) {
+      const retry = Math.ceil((e.resetAt - now) / 1000);
+      res.set('Retry-After', String(retry));
+      return res.status(429).json({ error: 'rate limited', retry_after: retry });
+    }
+    res.set('RateLimit-Remaining', String(Math.max(0, perMin - e.count)));
+    next();
+  };
+}
+
+const ingestLimiter = rateLimit({ perMin: INGEST_PER_MIN, name: 'ingest' });
+const readLimiter = rateLimit({ perMin: READ_PER_MIN, name: 'read' });
 
 /** Constant-time compare so a token can't be recovered by timing the endpoint. */
 function safeEqual(a, b) {
@@ -91,7 +131,8 @@ function range(q) {
 
 /* ----------------------------------------------------------------- ingest */
 
-app.post('/api/ingest', requireIngestAuth, (req, res) => {
+app.post('/api/ingest', ingestLimiter, requireIngestAuth,
+  express.json({ limit: '256kb' }), (req, res) => {
   const b = req.body;
   if (!b || typeof b !== 'object' || !b.session_id) {
     return res.status(400).json({ error: 'session_id required' });
@@ -194,7 +235,7 @@ const SUMMARY_COLS = `
   COALESCE(SUM(duration_sec), 0)   AS duration_sec
 `;
 
-app.get('/api/overview', requireDashboardAuth, (req, res) => {
+app.get('/api/overview', readLimiter, requireDashboardAuth, (req, res) => {
   const { from, to } = range(req.query);
   const args = [from, to];
 
@@ -246,7 +287,7 @@ app.get('/api/overview', requireDashboardAuth, (req, res) => {
   res.json({ range: { from, to, tz: TZ }, totals, byDeveloper, byDay, byModel, byProject });
 });
 
-app.get('/api/sessions', requireDashboardAuth, (req, res) => {
+app.get('/api/sessions', readLimiter, requireDashboardAuth, (req, res) => {
   const { from, to } = range(req.query);
   const where = ['day BETWEEN ? AND ?'];
   const args = [from, to];
@@ -278,7 +319,7 @@ app.get('/api/sessions', requireDashboardAuth, (req, res) => {
   res.json({ range: { from, to }, total, limit, offset, sessions: rows });
 });
 
-app.get('/api/sessions/:id', requireDashboardAuth, (req, res) => {
+app.get('/api/sessions/:id', readLimiter, requireDashboardAuth, (req, res) => {
   const s = db.prepare('SELECT * FROM sessions WHERE session_id = ?').get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   const models = db.prepare(
@@ -289,16 +330,29 @@ app.get('/api/sessions/:id', requireDashboardAuth, (req, res) => {
   res.json({ session: s, models, tools, files });
 });
 
-app.get('/api/health', (_req, res) => {
-  const n = db.prepare('SELECT COUNT(*) AS n FROM sessions').get().n;
-  res.json({ ok: true, sessions: n, pricing_updated: pricing.updated, tz: TZ });
+// Liveness only - deliberately does no database work, so it can't be used as a
+// free query amplifier. The row count moved to /api/stats, behind auth.
+app.get('/api/health', readLimiter, (_req, res) => {
+  res.json({ ok: true, pricing_updated: pricing.updated, tz: TZ });
 });
 
-app.use(requireDashboardAuth, express.static(path.join(ROOT, 'public')));
+app.get('/api/stats', readLimiter, requireDashboardAuth, (_req, res) => {
+  res.json({ sessions: db.prepare('SELECT COUNT(*) AS n FROM sessions').get().n });
+});
+
+app.use(readLimiter, requireDashboardAuth, express.static(path.join(ROOT, 'public')));
+
+app.use((err, _req, res, _next) => {
+  if (err?.type === 'entity.too.large') return res.status(413).json({ error: 'payload too large' });
+  if (err?.type === 'entity.parse.failed') return res.status(400).json({ error: 'invalid json' });
+  console.error('[usage-tracker]', err?.message);
+  res.status(500).json({ error: 'internal error' });
+});
 
 app.listen(PORT, HOST, () => {
   console.log(`[usage-tracker] listening on http://${HOST}:${PORT}`);
   console.log(`[usage-tracker] db=${DB_FILE} tz=${TZ}`);
   if (!INGEST_TOKEN) console.warn('[usage-tracker] WARNING: INGEST_TOKEN unset - the ingest endpoint is open');
   if (!DASHBOARD_USER) console.warn('[usage-tracker] WARNING: DASHBOARD_USER unset - the dashboard is open');
+  console.log(`[usage-tracker] rate limits: ingest ${INGEST_PER_MIN}/min, read ${READ_PER_MIN}/min per IP; trust proxy=${TRUST_PROXY}`);
 });

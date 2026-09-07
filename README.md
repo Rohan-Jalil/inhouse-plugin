@@ -189,6 +189,38 @@ did, which raw token counts don't give you when sessions mix models. Update
 `pricing.json` when prices change; cache-write defaults to 1.25× input and
 cache-read to 0.10× input unless a model overrides them.
 
+## Exposing this safely
+
+Publishing the code does not expose your server: the repo contains no endpoint
+URL and no token. What it does mean is that anyone can read exactly how the API
+works — which only matters once they know where it lives.
+
+Built-in protections:
+
+| | |
+|---|---|
+| `POST /api/ingest` | Bearer token, constant-time compare. Rate limited **before** auth, and the JSON body is parsed **after** auth and capped at 256 KB — an unauthenticated flood is rejected without the server parsing anything. |
+| Read APIs + dashboard | HTTP basic auth, rate limited. |
+| `GET /api/health` | Open, but does zero database work, so it can't be used as a free query amplifier. The row count lives at `/api/stats`, behind auth. |
+| `TRUST_PROXY` | Defaults to 1 hop. Never set it to `true` — that trusts any `X-Forwarded-For` and lets a caller spoof their IP past the limiter. |
+
+The in-process limiter is a first line, not a shield. A single Node process on
+SQLite will not survive a distributed flood, and nothing in application code
+can. If this is reachable from the open internet, put something in front of it:
+
+1. **Don't expose it at all** — bind to a VPN/Tailscale address, or IP-allowlist
+   your offices in nginx. Strongest option, and usually sufficient for an
+   internal tool. Reports spool on the client and retry, so developers off the
+   VPN lose nothing; their sessions land when they reconnect.
+2. **Cloudflare (free tier) or your WAF** in front, with the origin locked to
+   Cloudflare IPs.
+3. **nginx `limit_req`** as a second layer, since it sheds load before Node.
+
+Keep `INGEST_TOKEN` long and random (`openssl rand -hex 32`), rotate it by
+updating the pushed settings, and remember the token is distributed to every
+developer machine — it authenticates *the fleet*, not individuals, so treat a
+leak as "rotate", not "breach".
+
 ## API
 
 | Method | Path | Auth | |

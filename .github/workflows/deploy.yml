@@ -72,10 +72,19 @@ jobs:
             --insecure --no-password --force \
             "$DEPLOY_USER" ~/.ssh/id_ecdsa \
           || {
-            echo "--- step config (for diagnosis; no secrets below)"
+            echo "--- defaults.json written by bootstrap"
             cat "$HOME/.step/config/defaults.json" 2>/dev/null || true
-            echo "--- step-related environment variable NAMES only"
-            env | grep -oiE '^[A-Z_]*(STEP|FINGERPRINT|SHA)[A-Z_]*' | sort -u || true
+            echo
+            echo "--- actual fingerprint of the downloaded root"
+            step certificate fingerprint "$HOME/.step/certs/root_ca.crt" || true
+            echo "--- expected"
+            echo "$CA_FINGERPRINT"
+            echo "--- retry with STEPDEBUG=1"
+            STEPDEBUG=1 step ssh certificate \
+              --ca-url "$CA_URL" --root "$HOME/.step/certs/root_ca.crt" \
+              --provisioner "$CA_PROVISIONER" --token "$ID_TOKEN" \
+              --insecure --no-password --force \
+              "$DEPLOY_USER" ~/.ssh/id_ecdsa 2>&1 | tail -40 || true
             exit 1
           }
 

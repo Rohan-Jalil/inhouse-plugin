@@ -11,6 +11,7 @@
 import express from 'express';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { openDb, makeStore } from './db.mjs';
 import { loadPricing } from './pricing.mjs';
@@ -29,6 +30,15 @@ const TZ = process.env.REPORT_TZ || process.env.TZ || 'UTC';
 const db = openDb(DB_FILE);
 const store = makeStore(db);
 const pricing = loadPricing(path.join(ROOT, 'pricing.json'));
+
+/** Commit currently running, so a deploy can be verified from outside the box. */
+const COMMIT = (() => {
+  if (process.env.COMMIT_SHA) return process.env.COMMIT_SHA.slice(0, 12);
+  try {
+    return execFileSync('git', ['-C', ROOT, 'rev-parse', '--short=12', 'HEAD'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 2000 }).trim();
+  } catch { return 'unknown'; }
+})();
 
 const TRUST_PROXY = process.env.TRUST_PROXY ?? '1';
 const INGEST_PER_MIN = Number(process.env.RATE_LIMIT_INGEST_PER_MIN || 600);
@@ -333,7 +343,7 @@ app.get('/api/sessions/:id', readLimiter, requireDashboardAuth, (req, res) => {
 // Liveness only - deliberately does no database work, so it can't be used as a
 // free query amplifier. The row count moved to /api/stats, behind auth.
 app.get('/api/health', readLimiter, (_req, res) => {
-  res.json({ ok: true, pricing_updated: pricing.updated, tz: TZ });
+  res.json({ ok: true, commit: COMMIT, pricing_updated: pricing.updated, tz: TZ });
 });
 
 app.get('/api/stats', readLimiter, requireDashboardAuth, (_req, res) => {
@@ -351,7 +361,7 @@ app.use((err, _req, res, _next) => {
 
 app.listen(PORT, HOST, () => {
   console.log(`[usage-tracker] listening on http://${HOST}:${PORT}`);
-  console.log(`[usage-tracker] db=${DB_FILE} tz=${TZ}`);
+  console.log(`[usage-tracker] db=${DB_FILE} tz=${TZ} commit=${COMMIT}`);
   if (!INGEST_TOKEN) console.warn('[usage-tracker] WARNING: INGEST_TOKEN unset - the ingest endpoint is open');
   if (!DASHBOARD_USER) console.warn('[usage-tracker] WARNING: DASHBOARD_USER unset - the dashboard is open');
   console.log(`[usage-tracker] rate limits: ingest ${INGEST_PER_MIN}/min, read ${READ_PER_MIN}/min per IP; trust proxy=${TRUST_PROXY}`);

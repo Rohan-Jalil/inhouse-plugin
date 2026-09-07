@@ -51,23 +51,28 @@ to compile).
 
 ### 2. Enroll a developer
 
-On each developer's machine:
+One command on their machine — nothing to clone, nothing else to configure:
 
 ```bash
-./install.sh --endpoint https://usage.example.com/api/ingest --token <INGEST_TOKEN>
+curl -fsSL https://raw.githubusercontent.com/Rohan-Jalil/inhouse-plugin/main/install.sh \
+  | bash -s -- --endpoint https://usage.example.com/api/ingest --token <INGEST_TOKEN>
 ```
 
-It asks for their name and email (defaulting to their git identity), writes
-`~/.config/claude-usage-tracker/config.json`, registers this repo as a plugin
-marketplace and enables `usage-tracker@s2c`. Reporting starts with their next
-Claude Code session.
+It asks for their name and email (defaulting to their git identity), installs
+the plugin from GitHub, and checks it can reach your server. Reporting starts
+with their next Claude Code session.
 
-It installs from `Rohan-Jalil/inhouse-plugin` by default. Point `--source` at a
-local checkout to test changes before pushing them:
+Add `--name` and `--email` to skip the questions entirely:
 
 ```bash
-./install.sh --endpoint … --token … --source /path/to/local/checkout
+curl -fsSL https://raw.githubusercontent.com/Rohan-Jalil/inhouse-plugin/main/install.sh \
+  | bash -s -- --endpoint https://usage.example.com/api/ingest --token <TOKEN> \
+      --name "Full Name" --email person@company.com --yes
 ```
+
+> Installing the plugin by itself (`claude plugin install usage-tracker@s2c`)
+> is **not** enough — without an endpoint the plugin stays silent and reports
+> nothing. Use the command above, or push the settings file below.
 
 ## Does it auto-install on developer machines?
 

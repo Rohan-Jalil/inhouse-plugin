@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Enrolls this machine in Claude Code usage tracking.
 #
+#   curl -fsSL https://raw.githubusercontent.com/Rohan-Jalil/inhouse-plugin/main/install.sh \
+#     | bash -s -- --endpoint https://usage.example.com/api/ingest --token <token>
+#
 #   ./install.sh --endpoint https://usage.example.com/api/ingest \
 #                --token <ingest-token> \
 #                [--name "Full Name"] [--email you@company.com] \
@@ -33,6 +36,17 @@ done
 die() { echo "error: $*" >&2; exit 1; }
 say() { echo "  $*"; }
 
+# Read one answer from the terminal. Never reads stdin: when this script is run
+# as `curl … | bash`, stdin is the script's own source and reading it would
+# swallow the rest of the script.
+ask() { # ask <prompt> <default> -> echoes the answer
+  _d="$2"
+  if [ "$NONINTERACTIVE" = "1" ] || [ ! -r /dev/tty ]; then echo "$_d"; return; fi
+  printf '  %s' "$1" > /dev/tty
+  IFS= read -r _a < /dev/tty || _a=""
+  [ -n "$_a" ] && echo "$_a" || echo "$_d"
+}
+
 echo
 echo "Claude Code usage tracking — setup"
 echo "──────────────────────────────────"
@@ -57,24 +71,17 @@ say "claude      $(claude --version 2>/dev/null | head -1)"
 # ------------------------------------------------------------------- identity
 if [ -z "$NAME" ]; then
   NAME="$(git config --global user.name 2>/dev/null || true)"
-  if [ "$NONINTERACTIVE" = "0" ]; then
-    read -r -p "  Your full name [${NAME}]: " input || true
-    [ -n "${input:-}" ] && NAME="$input"
-  fi
+  NAME="$(ask "Your full name [${NAME}]: " "$NAME")"
 fi
 if [ -z "$EMAIL" ]; then
   EMAIL="$(git config --global user.email 2>/dev/null || true)"
-  if [ "$NONINTERACTIVE" = "0" ]; then
-    read -r -p "  Your work email [${EMAIL}]: " input || true
-    [ -n "${input:-}" ] && EMAIL="$input"
-  fi
+  EMAIL="$(ask "Your work email [${EMAIL}]: " "$EMAIL")"
 fi
 [ -n "$NAME" ]  || die "A name is required (--name)."
 [ -n "$EMAIL" ] || die "An email is required (--email)."
 
 if [ -z "$ENDPOINT" ]; then
-  [ "$NONINTERACTIVE" = "1" ] && die "--endpoint is required."
-  read -r -p "  Ingest endpoint URL: " ENDPOINT || true
+  ENDPOINT="$(ask "Ingest endpoint URL: " "")"
 fi
 [ -n "$ENDPOINT" ] || die "An endpoint is required (--endpoint)."
 
@@ -138,7 +145,7 @@ echo "Verifying the reporter can reach the server…"
 # Prefer a local checkout (running install.sh from the repo); otherwise use the
 # copy Claude Code just installed into its plugin cache.
 REPORTER=""
-HERE="$(cd "$(dirname "$0")" && pwd)"
+HERE="$(cd "$(dirname "$0")" 2>/dev/null && pwd || echo /nonexistent)"
 if [ -f "$HERE/plugins/usage-tracker/scripts/report.mjs" ]; then
   REPORTER="$HERE/plugins/usage-tracker/scripts/report.mjs"
 else

@@ -6,6 +6,11 @@ set -euo pipefail
 
 APP="$HOME/inhouse-plugin"
 URL="http://127.0.0.1:4317/api/health"
+# Written only after a deploy is verified healthy. The git checkout is not a
+# safe marker: it can advance without the service restarting (a manual pull, a
+# restart that failed), and then a checkout-vs-origin check skips forever while
+# the service keeps serving old code.
+STAMP="$HOME/REDACTED/deployed.sha"
 
 export NVM_DIR="$HOME/.nvm"
 # shellcheck disable=SC1091
@@ -17,11 +22,12 @@ PREV="$(git -C "$APP" rev-parse HEAD)"
 
 git -C "$APP" fetch --quiet origin main
 TARGET="$(git -C "$APP" rev-parse origin/main)"
+DEPLOYED="$(cat "$STAMP" 2>/dev/null || echo none)"
 
 # Nothing to do. Matters because a timer runs this on a schedule: without the
 # check every tick would reinstall and restart a healthy service.
-if [ "$PREV" = "$TARGET" ] && [ "${FORCE:-0}" != "1" ]; then
-  echo "==> already at ${PREV:0:7}, nothing to deploy"
+if [ "$DEPLOYED" = "$TARGET" ] && [ "${FORCE:-0}" != "1" ]; then
+  echo "==> already serving ${TARGET:0:7}, nothing to deploy"
   exit 0
 fi
 
@@ -35,6 +41,8 @@ systemctl --user restart inhouse-plugin.service
 
 for _ in $(seq 1 20); do
   if curl -fsS --max-time 2 "$URL" >/dev/null 2>&1; then
+    mkdir -p "$(dirname "$STAMP")"
+    git -C "$APP" rev-parse HEAD > "$STAMP"
     echo "==> healthy: $(curl -s "$URL")"
     exit 0
   fi

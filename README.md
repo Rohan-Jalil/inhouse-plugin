@@ -194,6 +194,74 @@ did, which raw token counts don't give you when sessions mix models. Update
 `pricing.json` when prices change; cache-write defaults to 1.25× input and
 cache-read to 0.10× input unless a model overrides them.
 
+## Deploying the server
+
+Deployed at `deploy@REDACTED_IP` (`REDACTED`), listening on
+**127.0.0.1:4317** — not reachable from the internet until an nginx vhost is
+added (see below).
+
+Layout on the server:
+
+```
+~/inhouse-plugin/          checkout of this repo
+~/inhouse-plugin/server/.env   secrets, 0600, generated on the box
+~/REDACTED/         usage.sqlite lives here, outside the checkout
+~/.config/systemd/user/inhouse-plugin.service
+```
+
+The service runs as a **systemd user unit** because the deploy account has no
+root:
+
+```bash
+systemctl --user status inhouse-plugin
+systemctl --user restart inhouse-plugin
+journalctl --user -u inhouse-plugin -f
+```
+
+### Auto-deploy
+
+Pushing to `main` with changes under `server/` or `deploy/` runs
+`.github/workflows/deploy.yml`, which SSHes in and pipes `deploy/server-deploy.sh`
+to the box. That script pulls, runs `npm ci`, restarts the unit, then polls
+`/api/health` for 20s — **and rolls back to the previous commit if the health
+check fails.**
+
+Three repository secrets are required (Settings → Secrets and variables → Actions):
+
+| Secret | Value |
+|---|---|
+| `DEPLOY_HOST` | `REDACTED_IP` |
+| `DEPLOY_USER` | `deploy` |
+| `DEPLOY_SSH_KEY` | private key, read it with the command below |
+
+```bash
+ssh devflow-server 'cat ~/.ssh/github-actions-deploy'
+```
+
+That key is dedicated to CI and already authorized on the box; it grants shell
+as `deploy`, so treat it as a production credential.
+
+### Two things still need root
+
+The deploy account's sudo is limited to a single unrelated command, so these
+were left for someone with root:
+
+```bash
+# 1. survive a reboot (without this the service stops when the user session ends)
+sudo loginctl enable-linger deploy
+
+# 2. TLS + a hostname, so developers can actually reach it
+#    (see server/deploy/nginx.conf.example; proxy_pass http://127.0.0.1:4317)
+sudo certbot --nginx -d REDACTED
+```
+
+Until step 2, reach the dashboard over an SSH tunnel:
+
+```bash
+ssh -L 4317:127.0.0.1:4317 devflow-server
+# then open http://127.0.0.1:4317
+```
+
 ## Exposing this safely
 
 Publishing the code does not expose your server: the repo contains no endpoint

@@ -255,12 +255,20 @@ sudo loginctl enable-linger deploy
 sudo certbot --nginx -d REDACTED
 ```
 
-Until step 2, reach the dashboard over an SSH tunnel:
+**Until step 2 the server is unreachable from anywhere but the box itself.**
+The host sets `AllowTcpForwarding no`, so an SSH tunnel does *not* work — check
+it from a shell on the server instead:
 
 ```bash
-ssh -L 4317:127.0.0.1:4317 devflow-server
-# then open http://127.0.0.1:4317
+ssh devflow-server
+curl -s localhost:4317/api/health
+curl -s -u "usage:$(grep ^DASHBOARD_PASS= ~/inhouse-plugin/server/.env | cut -d= -f2)" \
+     localhost:4317/api/overview
 ```
+
+Nothing can report to it until it has a hostname, so do step 2 before enrolling
+anyone. Reports spool client-side and retry, so enrolling early is not
+destructive — developers' sessions simply queue until the endpoint answers.
 
 ## Exposing this safely
 

@@ -5,7 +5,12 @@
 set -euo pipefail
 
 APP="$HOME/inhouse-plugin"
-URL="http://127.0.0.1:4317/api/health"
+
+# Health lives under the app's mount path. Read it from .env rather than
+# hardcoding "/": once BASE_PATH is set, /api/health 404s and every deploy
+# would look unhealthy and roll itself back.
+BASE_PATH="$(sed -n 's/^BASE_PATH=//p' "$HOME/inhouse-plugin/server/.env" 2>/dev/null | tr -d '[:space:]')"
+URL="http://127.0.0.1:4317${BASE_PATH}/api/health"
 # Written only after a deploy is verified healthy. The git checkout is not a
 # safe marker: it can advance without the service restarting (a manual pull, a
 # restart that failed), and then a checkout-vs-origin check skips forever while

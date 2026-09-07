@@ -26,6 +26,16 @@ const INGEST_TOKEN = process.env.INGEST_TOKEN || '';
 const DASHBOARD_USER = process.env.DASHBOARD_USER || '';
 const DASHBOARD_PASS = process.env.DASHBOARD_PASS || '';
 const TZ = process.env.REPORT_TZ || process.env.TZ || 'UTC';
+// Path this app is mounted at behind a shared vhost, e.g. "/usage". Empty when
+// it owns the whole host. nginx must pass the full URI (proxy_pass without a
+// trailing slash) so links and the session cookie stay scoped to this prefix.
+const BASE_PATH = (process.env.BASE_PATH || '').replace(/\/+$/, '');
+const SESSION_HOURS = Number(process.env.SESSION_HOURS || 12);
+// Signing key for session cookies. Derived from the password so sessions
+// survive restarts and are invalidated when the password is rotated.
+const SESSION_SECRET = process.env.DASHBOARD_SECRET
+  || crypto.createHash('sha256').update(`session:${DASHBOARD_USER}:${DASHBOARD_PASS}`).digest('hex');
+const COOKIE = 'usage_session';
 
 const db = openDb(DB_FILE);
 const store = makeStore(db);
@@ -120,14 +130,67 @@ function requireIngestAuth(req, res, next) {
   next();
 }
 
+function sign(value) {
+  return crypto.createHmac('sha256', SESSION_SECRET).update(value).digest('base64url');
+}
+
+/** Stateless session token: "<expiry ms>.<hmac>". No server-side store needed. */
+function issueSession() {
+  const exp = String(Date.now() + SESSION_HOURS * 3600_000);
+  return `${exp}.${sign(exp)}`;
+}
+
+function validSession(token) {
+  if (typeof token !== 'string') return false;
+  const i = token.lastIndexOf('.');
+  if (i < 1) return false;
+  const exp = token.slice(0, i);
+  if (!/^\d+$/.test(exp) || Number(exp) < Date.now()) return false;
+  return safeEqual(token.slice(i + 1), sign(exp));
+}
+
+function readCookie(req, name) {
+  const raw = req.headers.cookie;
+  if (!raw) return null;
+  for (const part of raw.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq > 0 && part.slice(0, eq).trim() === name) return decodeURIComponent(part.slice(eq + 1).trim());
+  }
+  return null;
+}
+
+const loginPath = () => `${BASE_PATH}/login`;
+
+function setSessionCookie(req, res, token, maxAgeSec) {
+  const secure = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https';
+  res.cookie(COOKIE, token, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure,
+    path: BASE_PATH || '/',
+    maxAge: maxAgeSec * 1000,
+  });
+}
+
 function requireDashboardAuth(req, res, next) {
   if (!DASHBOARD_USER) return next();
+
+  if (validSession(readCookie(req, COOKIE))) return next();
+
+  // Basic auth stays supported so curl and scripts keep working.
   const header = req.get('authorization') || '';
   if (header.startsWith('Basic ')) {
     const [u, p] = Buffer.from(header.slice(6), 'base64').toString('utf8').split(':');
     if (u === DASHBOARD_USER && safeEqual(p ?? '', DASHBOARD_PASS)) return next();
   }
-  res.set('WWW-Authenticate', 'Basic realm="Claude Usage"').status(401).send('Authentication required');
+
+  // A browser gets the login page; an API client gets JSON it can act on.
+  const wantsHtml = (req.get('accept') || '').includes('text/html');
+  if (wantsHtml) {
+    const back = encodeURIComponent(req.originalUrl || BASE_PATH || '/');
+    return res.redirect(302, `${loginPath()}?next=${back}`);
+  }
+  return res.status(401).json({ error: 'unauthorized' });
 }
 
 /** Default window: the last 14 days, inclusive. */
@@ -142,9 +205,93 @@ function range(q) {
   return { from, to };
 }
 
+
+/* ------------------------------------------------------------------- login */
+
+const loginLimiter = rateLimit({ perMin: 20, name: 'login' });
+
+function loginPage(error, next) {
+  const action = loginPath();
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in · Claude Code usage</title>
+<style>
+:root { color-scheme: light; --surface-0:#f4f4f1; --surface-1:#fcfcfb; --border:#e3e2dd;
+  --border-strong:#d2d1ca; --text-primary:#0b0b0b; --text-secondary:#52514e; --text-muted:#7c7b73;
+  --accent:#2a78d6; --critical:#d03b3b; }
+@media (prefers-color-scheme: dark) { :root:where(:not([data-theme="light"])) {
+  color-scheme: dark; --surface-0:#101010; --surface-1:#1a1a19; --border:#302f2c;
+  --border-strong:#45443f; --text-primary:#fff; --text-secondary:#c3c2b7; --text-muted:#8f8e85;
+  --accent:#3987e5; --critical:#e66767; } }
+*{box-sizing:border-box} body{margin:0;min-height:100vh;display:grid;place-items:center;
+  background:var(--surface-0);color:var(--text-primary);
+  font:14px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.card{background:var(--surface-1);border:1px solid var(--border);border-radius:12px;
+  padding:28px;width:min(360px,calc(100vw - 32px))}
+h1{font-size:17px;font-weight:640;margin:0 0 4px;letter-spacing:-.01em}
+p.sub{margin:0 0 20px;color:var(--text-muted);font-size:12.5px}
+label{display:block;font-size:12px;color:var(--text-secondary);margin:0 0 5px}
+input{width:100%;font:inherit;padding:9px 11px;border-radius:8px;background:var(--surface-0);
+  border:1px solid var(--border-strong);color:var(--text-primary);margin-bottom:14px}
+input:focus{outline:2px solid var(--accent);outline-offset:-1px}
+button{width:100%;font:inherit;font-weight:560;padding:10px;border:0;border-radius:8px;
+  background:var(--accent);color:#fff;cursor:pointer}
+button:hover{filter:brightness(1.07)}
+.err{background:color-mix(in srgb,var(--critical) 12%,transparent);border:1px solid var(--critical);
+  color:var(--critical);border-radius:8px;padding:8px 11px;font-size:12.5px;margin-bottom:14px}
+</style></head><body>
+<form class="card" method="post" action="${action}">
+  <h1>Claude Code usage</h1>
+  <p class="sub">Sign in to view team usage.</p>
+  ${error ? `<div class="err">${error}</div>` : ''}
+  <input type="hidden" name="next" value="${next || ''}">
+  <label for="u">Username</label>
+  <input id="u" name="username" autocomplete="username" autofocus required>
+  <label for="p">Password</label>
+  <input id="p" name="password" type="password" autocomplete="current-password" required>
+  <button type="submit">Sign in</button>
+</form></body></html>`;
+}
+
+/** Only allow redirects back into this app, never to an attacker's URL. */
+function safeNext(next) {
+  const fallback = `${BASE_PATH}/`;
+  if (typeof next !== 'string' || !next.startsWith('/') || next.startsWith('//')) return fallback;
+  if (BASE_PATH && !next.startsWith(`${BASE_PATH}/`) && next !== BASE_PATH) return fallback;
+  return next;
+}
+
+app.get(`${BASE_PATH}/login`, loginLimiter, (req, res) => {
+  if (!DASHBOARD_USER || validSession(readCookie(req, COOKIE))) {
+    return res.redirect(302, safeNext(req.query.next));
+  }
+  res.type('html').send(loginPage(null, escapeAttr(req.query.next)));
+});
+
+app.post(`${BASE_PATH}/login`, loginLimiter, express.urlencoded({ extended: false, limit: '8kb' }),
+  (req, res) => {
+    const { username = '', password = '', next } = req.body || {};
+    const ok = username === DASHBOARD_USER && safeEqual(password, DASHBOARD_PASS);
+    if (!ok) {
+      // Same wording either way - don't reveal which field was wrong.
+      return res.status(401).type('html').send(loginPage('Incorrect username or password.', escapeAttr(next)));
+    }
+    setSessionCookie(req, res, issueSession(), SESSION_HOURS * 3600);
+    res.redirect(302, safeNext(next));
+  });
+
+app.post(`${BASE_PATH}/logout`, (req, res) => {
+  setSessionCookie(req, res, '', 0);
+  res.redirect(302, loginPath());
+});
+
+const escapeAttr = (v) => String(v ?? '').replace(/[&<>"']/g,
+  (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
 /* ----------------------------------------------------------------- ingest */
 
-app.post('/api/ingest', ingestLimiter, requireIngestAuth,
+app.post(`${BASE_PATH}/api/ingest`, ingestLimiter, requireIngestAuth,
   express.json({ limit: '256kb' }), (req, res) => {
   const b = req.body;
   if (!b || typeof b !== 'object' || !b.session_id) {
@@ -248,7 +395,7 @@ const SUMMARY_COLS = `
   COALESCE(SUM(duration_sec), 0)   AS duration_sec
 `;
 
-app.get('/api/overview', readLimiter, requireDashboardAuth, (req, res) => {
+app.get(`${BASE_PATH}/api/overview`, readLimiter, requireDashboardAuth, (req, res) => {
   const { from, to } = range(req.query);
   const args = [from, to];
 
@@ -300,7 +447,7 @@ app.get('/api/overview', readLimiter, requireDashboardAuth, (req, res) => {
   res.json({ range: { from, to, tz: TZ }, totals, byDeveloper, byDay, byModel, byProject });
 });
 
-app.get('/api/sessions', readLimiter, requireDashboardAuth, (req, res) => {
+app.get(`${BASE_PATH}/api/sessions`, readLimiter, requireDashboardAuth, (req, res) => {
   const { from, to } = range(req.query);
   const where = ['day BETWEEN ? AND ?'];
   const args = [from, to];
@@ -332,7 +479,7 @@ app.get('/api/sessions', readLimiter, requireDashboardAuth, (req, res) => {
   res.json({ range: { from, to }, total, limit, offset, sessions: rows });
 });
 
-app.get('/api/sessions/:id', readLimiter, requireDashboardAuth, (req, res) => {
+app.get(`${BASE_PATH}/api/sessions/:id`, readLimiter, requireDashboardAuth, (req, res) => {
   const s = db.prepare('SELECT * FROM sessions WHERE session_id = ?').get(req.params.id);
   if (!s) return res.status(404).json({ error: 'not found' });
   const models = db.prepare(
@@ -345,15 +492,15 @@ app.get('/api/sessions/:id', readLimiter, requireDashboardAuth, (req, res) => {
 
 // Liveness only - deliberately does no database work, so it can't be used as a
 // free query amplifier. The row count moved to /api/stats, behind auth.
-app.get('/api/health', readLimiter, (_req, res) => {
+app.get(`${BASE_PATH}/api/health`, readLimiter, (_req, res) => {
   res.json({ ok: true, commit: COMMIT, started_at: STARTED_AT, pricing_updated: pricing.updated, tz: TZ });
 });
 
-app.get('/api/stats', readLimiter, requireDashboardAuth, (_req, res) => {
+app.get(`${BASE_PATH}/api/stats`, readLimiter, requireDashboardAuth, (_req, res) => {
   res.json({ sessions: db.prepare('SELECT COUNT(*) AS n FROM sessions').get().n });
 });
 
-app.use(readLimiter, requireDashboardAuth, express.static(path.join(ROOT, 'public')));
+app.use(BASE_PATH || '/', readLimiter, requireDashboardAuth, express.static(path.join(ROOT, 'public')));
 
 app.use((err, _req, res, _next) => {
   if (err?.type === 'entity.too.large') return res.status(413).json({ error: 'payload too large' });
@@ -364,7 +511,7 @@ app.use((err, _req, res, _next) => {
 
 app.listen(PORT, HOST, () => {
   console.log(`[usage-tracker] listening on http://${HOST}:${PORT}`);
-  console.log(`[usage-tracker] db=${DB_FILE} tz=${TZ} commit=${COMMIT}`);
+  console.log(`[usage-tracker] db=${DB_FILE} tz=${TZ} commit=${COMMIT} basePath=${BASE_PATH || '/'}`);
   if (!INGEST_TOKEN) console.warn('[usage-tracker] WARNING: INGEST_TOKEN unset - the ingest endpoint is open');
   if (!DASHBOARD_USER) console.warn('[usage-tracker] WARNING: DASHBOARD_USER unset - the dashboard is open');
   console.log(`[usage-tracker] rate limits: ingest ${INGEST_PER_MIN}/min, read ${READ_PER_MIN}/min per IP; trust proxy=${TRUST_PROXY}`);

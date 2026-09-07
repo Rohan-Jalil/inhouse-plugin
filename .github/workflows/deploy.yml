@@ -15,6 +15,21 @@ concurrency:
   group: deploy-server
   cancel-in-progress: false
 
+# Authentication is a short-lived SSH certificate issued by the host's own
+# step-ca, in exchange for this run's GitHub OIDC token. There is no deploy key
+# and no repository secret: the certificate is valid for minutes and is bound to
+# this workflow run.
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  CA_URL: https://REDACTED_HOST:9443
+  CA_FINGERPRINT: REDACTED_FINGERPRINT
+  CA_PROVISIONER: github
+  DEPLOY_HOST: REDACTED_HOST
+  DEPLOY_USER: deploy
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -22,63 +37,41 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Deploy
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+      - name: Install step CLI
         run: |
           set -euo pipefail
+          curl -fsSL -o /tmp/step.tar.gz \
+            https://dl.smallstep.com/cli/docs-cli-install/latest/step_linux_amd64.tar.gz
+          tar -xzf /tmp/step.tar.gz -C /tmp
+          sudo install -m 0755 "$(find /tmp -type f -name step -perm -u+x | head -1)" /usr/local/bin/step
+          step version
 
-          # Secrets are pasted by hand, so strip whitespace/newlines and strip a
-          # scheme or user@ prefix if one crept in. Never echo the values.
-          host="$(printf '%s' "${DEPLOY_HOST:-}" | tr -d '[:space:]')"
-          host="${host#*://}"
-          host="${host#*@}"
-          host="${host%%/*}"
-          host="${host%%:*}"
-          user="$(printf '%s' "${DEPLOY_USER:-deploy}" | tr -d '[:space:]')"
+      - name: Get a short-lived SSH certificate via OIDC
+        run: |
+          set -euo pipefail
+          # The audience must match the provisioner's clientID on the CA.
+          ID_TOKEN="$(curl -fsSL \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${CA_URL}" | jq -r '.value')"
+          test -n "$ID_TOKEN" && test "$ID_TOKEN" != null \
+            || { echo "::error::No OIDC token returned. Is 'permissions: id-token: write' set?"; exit 1; }
 
-          if [ -z "$host" ]; then
-            echo "::error::DEPLOY_HOST secret is empty or unset"; exit 1
-          fi
-          if ! printf '%s' "$host" | grep -qE '^[A-Za-z0-9._-]+$'; then
-            echo "::error::DEPLOY_HOST is not a bare hostname or IP after cleanup (length ${#host}). Set it to just the address, e.g. 203.0.113.10 — no scheme, port, user@, or quotes."
-            exit 1
-          fi
-          if [ -z "${DEPLOY_SSH_KEY:-}" ]; then
-            echo "::error::DEPLOY_SSH_KEY secret is empty or unset"; exit 1
-          fi
-          echo "target resolved (host length ${#host}, user length ${#user})"
+          step ca bootstrap --ca-url "$CA_URL" --fingerprint "$CA_FINGERPRINT" --force
 
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          umask 077
+          step ssh certificate \
+            --provisioner "$CA_PROVISIONER" \
+            --token "$ID_TOKEN" \
+            --insecure --no-password --force \
+            "$DEPLOY_USER" ~/.ssh/id_ecdsa
 
-          # Recover the key from a hand paste. Two things routinely contaminate
-          # it: the host's SSH login banner copied along with the key, and
-          # literal \n sequences instead of real newlines. Keep only the PEM
-          # block, and unescape first if that block isn't there yet.
-          write_key() { sed -n '/-----BEGIN/,/-----END/p' > ~/.ssh/id_ed25519; }
+          echo "--- certificate issued:"
+          ssh-keygen -L -f ~/.ssh/id_ecdsa-cert.pub | sed -n '1,12p'
 
-          printf '%s\n' "$DEPLOY_SSH_KEY" | write_key
-          if ! ssh-keygen -y -f ~/.ssh/id_ed25519 >/dev/null 2>&1; then
-            printf '%b\n' "$DEPLOY_SSH_KEY" | write_key
-          fi
-          chmod 600 ~/.ssh/id_ed25519
-
-          if ! ssh-keygen -y -f ~/.ssh/id_ed25519 >/dev/null 2>&1; then
-            # Name the actual mistake instead of repeating generic advice.
-            case "$DEPLOY_SSH_KEY" in
-              ssh-ed25519*|ssh-rsa*|ecdsa-*)
-                echo "::error::DEPLOY_SSH_KEY holds a PUBLIC key (it starts with ssh-ed25519). The public key belongs on the server, already installed. GitHub needs the PRIVATE key — the file WITHOUT the .pub extension." ;;
-              *)
-                echo "::error::DEPLOY_SSH_KEY has no -----BEGIN----- line ($(wc -l < ~/.ssh/id_ed25519) recovered). Re-copy the private key file in full, including its BEGIN and END lines." ;;
-            esac
-            echo "::error::Get it with:  ssh devflow-server 'cat ~/.ssh/github-actions-deploy' 2>/dev/null > deploy-key.txt   (the 2>/dev/null strips the host's login banner), then paste the whole file."
-            exit 1
-          fi
-          echo "key parsed OK ($(ssh-keygen -lf ~/.ssh/id_ed25519 | awk '{print $1, $4}'))"
-
-          ssh-keyscan -T 10 "$host" >> ~/.ssh/known_hosts 2>/dev/null
+      - name: Deploy
+        run: |
+          set -euo pipefail
+          ssh-keyscan -T 10 "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
-            "${user}@${host}" 'bash -s' < deploy/server-deploy.sh
+            -i ~/.ssh/id_ecdsa \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" 'bash -s' < deploy/server-deploy.sh

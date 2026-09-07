@@ -226,26 +226,33 @@ to the box. That script pulls, runs `npm ci`, restarts the unit, then polls
 `/api/health` for 20s — **and rolls back to the previous commit if the health
 check fails.**
 
-Three repository secrets are required (Settings → Secrets and variables → Actions):
+**There are no repository secrets and no deploy key.** The host runs its own
+Smallstep CA (`step-ca` on `:9443`) which sshd trusts as an SSH user CA
+(`TrustedUserCAKeys`), and that CA already has a GitHub Actions OIDC
+provisioner:
 
-| Secret | Value |
-|---|---|
-| `DEPLOY_HOST` | `REDACTED_IP` |
-| `DEPLOY_USER` | `deploy` |
-| `DEPLOY_SSH_KEY` | private key, read it with the command below |
-
-```bash
-ssh devflow-server 'cat ~/.ssh/github-actions-deploy' 2>/dev/null > deploy-key.txt
+```
+OIDC | github
+  clientID : https://REDACTED_HOST:9443
+  issuer   : https://token.actions.githubusercontent.com
+  ssh cert : 5 min default, 10 min max
 ```
 
-**The `2>/dev/null` matters.** The host prints an "AUTHORIZED ACCESS ONLY"
-login banner on every connection; without it the banner ends up in your
-clipboard alongside the key and GitHub stores a corrupt secret. Paste the whole
-of `deploy-key.txt` — `-----BEGIN` line through `-----END` line — then delete
-the file.
+So each run exchanges its GitHub OIDC token for an SSH certificate that lives
+for minutes and is bound to that workflow run. Nothing long-lived is stored in
+GitHub, and there is no key to leak or rotate.
 
-That key is dedicated to CI and already authorized on the box; it grants shell
-as `deploy`, so treat it as a production credential.
+The workflow needs `permissions: id-token: write` — without it GitHub issues no
+OIDC token and the run fails at the first step.
+
+The CA's public parameters live in the workflow's `env:` block (CA URL, root
+fingerprint, provisioner name). They are not secrets; the fingerprint is what
+pins the CA against impersonation.
+
+> A previous revision used a `DEPLOY_SSH_KEY` secret. That key
+> (`~/.ssh/github-actions-deploy` on the box) is no longer used — revoke it by
+> removing its line from `~/.ssh/authorized_keys`, and delete the
+> `DEPLOY_SSH_KEY`, `DEPLOY_HOST` and `DEPLOY_USER` repository secrets.
 
 ### Two things still need root
 

@@ -59,11 +59,25 @@ jobs:
           step ca bootstrap --ca-url "$CA_URL" --fingerprint "$CA_FINGERPRINT" --force
 
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          step ssh certificate \
+
+          # Pass the CA explicitly. step's flags also read environment
+          # variables, and on a GitHub runner it otherwise picks up GITHUB_SHA
+          # as the root fingerprint and fails looking for a root that does not
+          # exist. env -u keeps that variable out of step's view entirely.
+          env -u GITHUB_SHA -u SHA step ssh certificate \
+            --ca-url "$CA_URL" \
+            --root "$HOME/.step/certs/root_ca.crt" \
             --provisioner "$CA_PROVISIONER" \
             --token "$ID_TOKEN" \
             --insecure --no-password --force \
-            "$DEPLOY_USER" ~/.ssh/id_ecdsa
+            "$DEPLOY_USER" ~/.ssh/id_ecdsa \
+          || {
+            echo "--- step config (for diagnosis; no secrets below)"
+            cat "$HOME/.step/config/defaults.json" 2>/dev/null || true
+            echo "--- step-related environment variable NAMES only"
+            env | grep -oiE '^[A-Z_]*(STEP|FINGERPRINT|SHA)[A-Z_]*' | sort -u || true
+            exit 1
+          }
 
           echo "--- certificate issued:"
           ssh-keygen -L -f ~/.ssh/id_ecdsa-cert.pub | sed -n '1,12p'

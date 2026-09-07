@@ -235,8 +235,14 @@ Three repository secrets are required (Settings → Secrets and variables → Ac
 | `DEPLOY_SSH_KEY` | private key, read it with the command below |
 
 ```bash
-ssh devflow-server 'cat ~/.ssh/github-actions-deploy'
+ssh devflow-server 'cat ~/.ssh/github-actions-deploy' 2>/dev/null > deploy-key.txt
 ```
+
+**The `2>/dev/null` matters.** The host prints an "AUTHORIZED ACCESS ONLY"
+login banner on every connection; without it the banner ends up in your
+clipboard alongside the key and GitHub stores a corrupt secret. Paste the whole
+of `deploy-key.txt` — `-----BEGIN` line through `-----END` line — then delete
+the file.
 
 That key is dedicated to CI and already authorized on the box; it grants shell
 as `deploy`, so treat it as a production credential.

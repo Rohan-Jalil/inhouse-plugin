@@ -52,15 +52,25 @@ jobs:
           echo "target resolved (host length ${#host}, user length ${#user})"
 
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          # A key pasted with literal \n instead of real newlines is the other
-          # common paste error - fail with a clear message rather than a vague
-          # "invalid format" from ssh.
+          umask 077
+
+          # Recover the key from a hand paste. Two things routinely contaminate
+          # it: the host's SSH login banner copied along with the key, and
+          # literal \n sequences instead of real newlines. Keep only the PEM
+          # block, and unescape first if that block isn't there yet.
+          write_key() { sed -n '/-----BEGIN/,/-----END/p' > ~/.ssh/id_ed25519; }
+
+          printf '%s\n' "$DEPLOY_SSH_KEY" | write_key
           if ! ssh-keygen -y -f ~/.ssh/id_ed25519 >/dev/null 2>&1; then
-            echo "::error::DEPLOY_SSH_KEY is not a valid private key. Paste the whole file including the BEGIN/END lines and real line breaks."
+            printf '%b\n' "$DEPLOY_SSH_KEY" | write_key
+          fi
+          chmod 600 ~/.ssh/id_ed25519
+
+          if ! ssh-keygen -y -f ~/.ssh/id_ed25519 >/dev/null 2>&1; then
+            echo "::error::DEPLOY_SSH_KEY could not be parsed ($(wc -l < ~/.ssh/id_ed25519) lines recovered). Regenerate the secret with:  ssh devflow-server 'cat ~/.ssh/github-actions-deploy' 2>/dev/null  — the 2>/dev/null matters, the host prints a login banner that corrupts the paste."
             exit 1
           fi
+          echo "key parsed OK ($(ssh-keygen -lf ~/.ssh/id_ed25519 | awk '{print $1, $4}'))"
 
           ssh-keyscan -T 10 "$host" >> ~/.ssh/known_hosts 2>/dev/null
           ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \

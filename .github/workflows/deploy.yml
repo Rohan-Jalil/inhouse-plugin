@@ -60,6 +60,17 @@ jobs:
           test -n "$ID_TOKEN" && test "$ID_TOKEN" != null \
             || { echo "::error::No OIDC token returned. Is 'permissions: id-token: write' set?"; exit 1; }
 
+          # Show what the CA will be deciding on. These are the signed claims
+          # GitHub asserts about this run; they are what the CA's template
+          # allowlists against. Printing them is safe - the token itself is
+          # never echoed, and it expires in minutes.
+          payload="$(printf '%s' "$ID_TOKEN" | cut -d. -f2)"
+          case $(( ${#payload} % 4 )) in 2) payload="$payload==";; 3) payload="$payload=";; esac
+          echo "--- OIDC claims the CA authorises against:"
+          printf '%s' "$payload" | tr '_-' '/+' | base64 -d 2>/dev/null \
+            | jq '{iss, aud, repository, repository_owner, sub, ref, workflow_ref, runner_environment}' \
+            || echo "  (could not decode claims)"
+
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           ssh-keygen -q -t ed25519 -N '' -C "github-actions-$GITHUB_RUN_ID" -f ~/.ssh/id_ed25519
 

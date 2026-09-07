@@ -70,7 +70,7 @@ curl -fsSL https://raw.githubusercontent.com/Rohan-Jalil/inhouse-plugin/main/ins
       --name "Full Name" --email person@company.com --yes
 ```
 
-> Installing the plugin by itself (`claude plugin install usage-tracker@s2c`)
+> Installing the plugin by itself (`claude plugin install inhouse-plugin@inhouse-plugin`)
 > is **not** enough — without an endpoint the plugin stays silent and reports
 > nothing. Use the command above, or push the settings file below.
 
@@ -87,9 +87,9 @@ marketplace; **from the second session onward the hooks fire.**
 ```json
 {
   "extraKnownMarketplaces": {
-    "s2c": { "source": { "source": "github", "repo": "Rohan-Jalil/inhouse-plugin" } }
+    "inhouse-plugin": { "source": { "source": "github", "repo": "Rohan-Jalil/inhouse-plugin" } }
   },
-  "enabledPlugins": { "usage-tracker@s2c": true },
+  "enabledPlugins": { "inhouse-plugin@inhouse-plugin": true },
   "env": {
     "CLAUDE_USAGE_ENDPOINT": "https://usage.example.com/api/ingest",
     "CLAUDE_USAGE_TOKEN": "…"
@@ -241,7 +241,7 @@ leak as "rotate", not "breach".
 ```bash
 # one developer, keep the plugin installed
 #   set "enabled": false in ~/.config/claude-usage-tracker/config.json
-claude plugin uninstall usage-tracker@s2c    # remove entirely
+claude plugin uninstall inhouse-plugin@inhouse-plugin    # remove entirely
 ```
 
 ## A note on consent

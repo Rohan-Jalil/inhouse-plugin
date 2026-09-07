@@ -1,5 +1,5 @@
 {
-  "name": "usage-tracker",
+  "name": "inhouse-plugin",
   "version": "1.0.0",
   "description": "Reports per-session Claude Code token usage, project and summary to the internal usage dashboard.",
   "author": {

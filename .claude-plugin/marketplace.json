@@ -1,15 +1,15 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "s2c",
+  "name": "inhouse-plugin",
   "description": "Internal Claude Code plugins for Step2Compliance.",
   "owner": {
     "name": "Step2Compliance"
   },
   "plugins": [
     {
-      "name": "usage-tracker",
+      "name": "inhouse-plugin",
       "description": "Reports per-session Claude Code token usage, project and summary to the internal usage dashboard.",
-      "source": "./plugins/usage-tracker",
+      "source": "./plugins/inhouse-plugin",
       "category": "productivity"
     }
   ]

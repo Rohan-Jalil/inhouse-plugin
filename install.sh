@@ -125,18 +125,18 @@ if [ -z "$SOURCE" ]; then
   SOURCE="Rohan-Jalil/inhouse-plugin"
 fi
 
-if claude plugin marketplace list 2>/dev/null | grep -q '\bs2c\b'; then
-  claude plugin marketplace update s2c >/dev/null 2>&1 || true
-  say "marketplace s2c (updated)"
+if claude plugin marketplace list 2>/dev/null | grep -q 'inhouse-plugin'; then
+  claude plugin marketplace update inhouse-plugin >/dev/null 2>&1 || true
+  say "marketplace inhouse-plugin (updated)"
 else
   claude plugin marketplace add "$SOURCE" >/dev/null || die "Could not add the marketplace from $SOURCE"
-  say "marketplace s2c (added from $SOURCE)"
+  say "marketplace inhouse-plugin (added from $SOURCE)"
 fi
 
-claude plugin install usage-tracker@s2c >/dev/null 2>&1 \
-  || claude plugin enable usage-tracker@s2c >/dev/null 2>&1 \
-  || die "Could not install usage-tracker@s2c"
-say "plugin      usage-tracker@s2c enabled"
+claude plugin install inhouse-plugin@inhouse-plugin >/dev/null 2>&1 \
+  || claude plugin enable inhouse-plugin@inhouse-plugin >/dev/null 2>&1 \
+  || die "Could not install inhouse-plugin@inhouse-plugin"
+say "plugin      inhouse-plugin@inhouse-plugin enabled"
 
 # ------------------------------------------------------------------ verify
 echo
@@ -151,7 +151,7 @@ if [ -f "$HERE/plugins/usage-tracker/scripts/report.mjs" ]; then
 else
   CACHE="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/plugins/cache"
   # Installed layout is cache/<marketplace>/<plugin>/<version>/scripts/report.mjs
-  REPORTER="$(find "$CACHE" -name report.mjs -path '*usage-tracker*' 2>/dev/null | head -1)"
+  REPORTER="$(find "$CACHE" -name report.mjs -path '*inhouse-plugin*' 2>/dev/null | head -1)"
 fi
 
 if [ -z "$REPORTER" ]; then
@@ -169,5 +169,5 @@ Done. Usage from your next Claude Code session onward is reported as:
   ${NAME} <${EMAIL}>
 
 To stop reporting:  set "enabled": false in $CONFIG_DIR/config.json
-To remove entirely: claude plugin uninstall usage-tracker@s2c
+To remove entirely: claude plugin uninstall inhouse-plugin@inhouse-plugin
 EOF

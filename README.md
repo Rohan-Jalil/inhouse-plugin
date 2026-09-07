@@ -254,6 +254,31 @@ pins the CA against impersonation.
 > removing its line from `~/.ssh/authorized_keys`, and delete the
 > `DEPLOY_SSH_KEY`, `DEPLOY_HOST` and `DEPLOY_USER` repository secrets.
 
+#### One CA change is still needed
+
+The pipeline currently stops here:
+
+```
+CA root verified against pinned fingerprint
+CA refused to sign (HTTP 400): Certificate denied: unauthorized repository.
+```
+
+Everything works — the runner gets its OIDC token, the CA verifies it and
+applies its policy — and the CA then correctly refuses, because
+`Rohan-Jalil/inhouse-plugin` is not in the repository allowlist of
+`REDACTED`. That file is readable
+only by the `step` user, so a root user has to add this repo alongside whatever
+is already permitted, then:
+
+```bash
+sudo systemctl reload step-ca     # or restart
+```
+
+No workflow change is needed; re-run the job once the template allows the repo.
+
+Note the CA caps these certificates at **10 minutes** and disables renewal, so a
+deploy must finish inside that window. Ours takes seconds.
+
 ### Two things still need root
 
 The deploy account's sudo is limited to a single unrelated command, so these

@@ -8,8 +8,13 @@
 #                --token <ingest-token> \
 #                [--name "Full Name"] [--email you@company.com] \
 #                [--source owner/repo | /local/path]   (default: the public repo)
+#                [--jev | --no-jev]
 #
-# Re-running is safe: it updates the config in place.
+#   --jev     route Claude Code through the local proxy so Jev picks the model
+#             for each session (sets ANTHROPIC_BASE_URL in Claude's settings.json)
+#   --no-jev  undo that; Claude Code talks to the API directly again
+#
+# Re-running is safe: it updates the config and the plugin in place.
 
 set -euo pipefail
 
@@ -19,6 +24,8 @@ NAME=""
 EMAIL=""
 SOURCE=""
 NONINTERACTIVE=0
+JEV=""            # "" = leave as is, on, off
+JEV_PORT=47821
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -28,7 +35,9 @@ while [ $# -gt 0 ]; do
     --email)    EMAIL="$2";    shift 2 ;;
     --source)   SOURCE="$2";   shift 2 ;;
     --yes|-y)   NONINTERACTIVE=1; shift ;;
-    -h|--help)  sed -n '2,12p' "$0"; exit 0 ;;
+    --jev)      JEV=on;  shift ;;
+    --no-jev)   JEV=off; shift ;;
+    -h|--help)  sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -173,12 +182,59 @@ fi
 claude plugin install inhouse-plugin@inhouse-plugin >/dev/null 2>&1 \
   || claude plugin enable inhouse-plugin@inhouse-plugin >/dev/null 2>&1 \
   || die "Could not install inhouse-plugin@inhouse-plugin"
-say "plugin      inhouse-plugin@inhouse-plugin enabled"
+# Already installed? Bring it to the latest version.
+claude plugin update inhouse-plugin@inhouse-plugin >/dev/null 2>&1 || true
+say "plugin      inhouse-plugin@inhouse-plugin $(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$(find "$CFG_DIR/plugins/cache" -path '*inhouse-plugin*/.claude-plugin/plugin.json' 2>/dev/null | sort | tail -1)" 2>/dev/null | head -1) enabled"
 
 if ! grep -q 'inhouse-plugin@inhouse-plugin' "$CFG_DIR/plugins/installed_plugins.json" 2>/dev/null; then
   die "the plugin did not install into $CFG_DIR, so Claude Code will not load it.
        If you launch Claude Code with a different CLAUDE_CONFIG_DIR, re-run with:
          CLAUDE_CONFIG_DIR=/path/to/dir $0 ..."
+fi
+
+# ------------------------------------------------------------------- jev
+# Point Claude Code at the local routing proxy (or stop doing so). The URL goes
+# in Claude's own settings.json env block, which Claude Code applies at start.
+if [ -n "$JEV" ]; then
+  PROXY_JS="$(find "$CFG_DIR/plugins/cache" -path '*inhouse-plugin*/scripts/proxy.mjs' 2>/dev/null | sort | tail -1)"
+  [ -n "$PROXY_JS" ] || die "proxy.mjs not found in $CFG_DIR/plugins/cache - is the plugin at 1.2.0 or later?"
+  "$NODE" -e '
+    const fs = require("fs"), path = require("path");
+    const [cfgDir, claudeDir, mode, port] = process.argv.slice(1);
+    const ours = `http://127.0.0.1:${port}`;
+    const cfgFile = path.join(cfgDir, "config.json");
+    const setFile = path.join(claudeDir, "settings.json");
+    const cfg = JSON.parse(fs.readFileSync(cfgFile, "utf8"));
+    let st = {}; try { st = JSON.parse(fs.readFileSync(setFile, "utf8")); } catch {}
+    st.env = st.env || {};
+    const current = st.env.ANTHROPIC_BASE_URL || "";
+    cfg.jev = cfg.jev || {};
+    if (mode === "on") {
+      // Keep any gateway the developer already used as our upstream.
+      if (current && current !== ours) cfg.jev.upstream = current;
+      cfg.jev.enabled = true; cfg.jev.port = Number(port);
+      st.env.ANTHROPIC_BASE_URL = ours;
+    } else {
+      cfg.jev.enabled = false;
+      if (current === ours) {
+        if (cfg.jev.upstream && cfg.jev.upstream !== "https://api.anthropic.com") st.env.ANTHROPIC_BASE_URL = cfg.jev.upstream;
+        else delete st.env.ANTHROPIC_BASE_URL;
+      }
+      if (!Object.keys(st.env).length) delete st.env;
+    }
+    fs.writeFileSync(cfgFile, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
+    fs.writeFileSync(setFile, JSON.stringify(st, null, 2) + "\n");
+  ' "$CONFIG_DIR" "$CFG_DIR" "$JEV" "$JEV_PORT"
+  if [ "$JEV" = "on" ]; then
+    INHOUSE_PROXY_PORT="$JEV_PORT" "$NODE" "$PROXY_JS" --ensure
+    PH="$(curl -s --max-time 3 "http://127.0.0.1:$JEV_PORT/__inhouse/health" 2>/dev/null || true)"
+    case "$PH" in
+      *'"ok":true'*) say "jev         on — Claude Code routes through 127.0.0.1:$JEV_PORT" ;;
+      *) die "the routing proxy did not start on 127.0.0.1:$JEV_PORT. Undo with: $0 --no-jev" ;;
+    esac
+  else
+    say "jev         off — Claude Code talks to the API directly"
+  fi
 fi
 
 # ------------------------------------------------------------------ verify

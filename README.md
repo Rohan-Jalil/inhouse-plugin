@@ -32,6 +32,31 @@ gzipped and uploaded in the background, so it never slows the session down. If
 the server can't take it yet, it waits in `~/.cache/claude-usage-tracker/uploads`
 (capped at 300 MB) and retries later.
 
+### Jev model routing (opt-in)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Rohan-Jalil/inhouse-plugin/main/install.sh \
+  | bash -s -- --endpoint <INGEST_URL> --token <INGEST_TOKEN> --jev
+```
+
+`--jev` points Claude Code at a small local proxy (`127.0.0.1:47821`, via
+`ANTHROPIC_BASE_URL` in Claude's `settings.json`). On each session's first
+prompt the proxy asks the server, and [Jev](https://www.jevai.org/) picks
+Opus 5.5 or Sonnet 5.5; the rest of that session goes to the chosen model.
+Hooks can't do this — Claude Code only switches models via `/model` — so the
+proxy rewrites the request's `model` field instead.
+
+- Once per session, before there is any history, so no prompt cache is lost.
+- Only the conversation's own model is rerouted; Haiku background calls and
+  subagents pinned to another model pass through untouched.
+- Any failure — server down, Jev slow, spend cap reached — sends the request
+  exactly as Claude Code wrote it. Decisions are logged (no content) to
+  `~/.cache/claude-usage-tracker/proxy.log`.
+- Claude Code's own UI still names the model you picked; the dashboard shows
+  the one that actually answered, Jev's choice, and the estimated saving.
+
+Turn it off with `--no-jev` (restores any `ANTHROPIC_BASE_URL` you had before).
+
 Update to the latest version:
 
 ```bash
@@ -59,6 +84,7 @@ node --env-file=.env src/server.mjs
 | `POST /api/transcripts/:session/:file` | one ≤1 MB chunk of a gzipped transcript (Bearer token) |
 | `GET /api/transcripts/:session[/:file]` | list / download stored transcripts (login required) |
 | `GET /api/spend` | this month's estimated Cloudflare spend against the cap |
+| `POST /api/route` | Jev's model choice for a session (Bearer token; used by the proxy) |
 | `GET /api/health` | liveness, no auth |
 | `GET /` | dashboard (login required) |
 
@@ -71,6 +97,11 @@ route answers 503 and clients keep their copy. They are deleted after
 every R2 (and Jev) call is estimated first and refused once the month's total
 would pass `SPEND_CAP_USD` (default 10). Estimates ignore Cloudflare's free
 allowances, so the real bill is at or below the figure shown.
+
+**Jev** runs on Cloudflare Workers AI when `CF_ACCOUNT_ID` and `CF_AI_TOKEN`
+are set; see `.env.example` for the confidence threshold and whether upgrades
+are allowed. Without them `/api/route` answers "not configured" and every
+request passes through unchanged.
 
 Put TLS in front of it, and keep it off the open internet if you can — reports
 contain prompt text. `BASE_PATH` mounts it under a sub-path behind a shared

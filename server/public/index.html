@@ -446,13 +446,22 @@ function devTable(rows) {
     </tbody>`;
 }
 
-const SESSION_COLS = 14;
+const SESSION_COLS = 15;
+const short = (m) => String(m || '').replace(/^claude-/, '');
+/** Jev cell: what it chose, and whether that was applied. */
+function jevCell(s) {
+  if (!s.jev_reason && !s.jev_tier) return '<span style="color:var(--text-muted)">—</span>';
+  if (s.jev_applied) {
+    return `<span class="chip-model" title="${esc(s.jev_reason)} · confidence ${Number(s.jev_confidence).toFixed(2)}">${esc(short(s.jev_requested))} → <b>${esc(short(s.jev_chosen))}</b></span>`;
+  }
+  return `<span class="pill" title="${esc(s.jev_reason)}${s.jev_confidence ? ` · confidence ${Number(s.jev_confidence).toFixed(2)}` : ''}">kept</span>`;
+}
 function sessionTable(rows) {
   const t = document.getElementById('session-table');
   if (!rows.length) { t.innerHTML = '<tbody><tr><td class="empty">No sessions match.</td></tr></tbody>'; return; }
   t.innerHTML = `
     <thead><tr>
-      <th>Started</th><th>Developer</th><th>Project</th><th>What the session was about</th><th>Model</th>
+      <th>Started</th><th>Developer</th><th>Project</th><th>What the session was about</th><th>Model</th><th title="Jev's model choice for this session">Jev</th>
       <th class="num">Turns</th>
       <th class="num" title="Input tokens">Read</th><th class="num" title="Output tokens">Write</th>
       <th class="num">Cache write</th><th class="num">Cache read</th><th class="num">Total</th>
@@ -465,6 +474,7 @@ function sessionTable(rows) {
         <td>${esc(s.project_name || '—')}${s.git_branch ? `<br><span class="mono" style="color:var(--text-muted)">${esc(s.git_branch)}</span>` : ''}</td>
         <td class="wrap-cell">${esc(s.headline || s.title || '—')}</td>
         <td>${s.primary_model ? `<span class="chip-model">${esc(s.primary_model.replace(/^claude-/, ''))}</span>${s.model_count > 1 ? ` <span class="pill" title="This session used ${s.model_count} models; the one shown did most of the work">+${s.model_count - 1}</span>` : ''}` : '—'}</td>
+        <td>${jevCell(s)}</td>
         <td class="num">${nf.format(s.turns)}</td>
         <td class="num">${tokens(s.input_tokens)}</td>
         <td class="num">${tokens(s.output_tokens)}</td>
@@ -524,6 +534,8 @@ async function toggleDetail(tr, id) {
     <dt>Tools</dt><dd>${tools}</dd>
     <dt>Files touched</dt><dd class="mono">${files}</dd>
     <dt>Transcript</dt><dd class="mono">${transcript}</dd>
+    <dt>Jev</dt><dd>${r.jev ? `${r.jev.applied ? `rerouted ${esc(short(r.jev.requested_model))} → <b>${esc(short(r.jev.chosen_model))}</b>` : `kept ${esc(short(r.jev.requested_model))}`}
+      · ${esc(r.jev.reason)}${r.jev.recommended_tier ? ` · recommended ${esc(r.jev.recommended_tier)} at ${Number(r.jev.confidence).toFixed(2)}` : ''}` : 'no decision (routing off for this machine, or session predates Jev)'}</dd>
     <dt>Reports</dt><dd>${nf.format(s.report_count)} · ${s.is_final ? `ended (${esc(s.end_reason || 'end')})` : 'still open or ended without a final report'}</dd>
   </dl></td>`;
 }
@@ -556,6 +568,10 @@ async function load() {
       <div class="foot">list price equivalent</div></div>
     <div class="tile"><div class="label">Developers</div><div class="value">${nf.format(t.developers)}</div>
       <div class="foot">on ${nf.format(t.accounts)} Claude account${t.accounts === 1 ? '' : 's'}</div></div>
+    ${overview.jev && (overview.jev.enabled || overview.jev.decided) ? `<div class="tile" title="Sessions where Jev chose the model. Saving = rerouted sessions' tokens at the requested model's list price minus their actual cost.">
+      <div class="label">Jev routing</div>
+      <div class="value">${money(overview.jev.saved_usd)}</div>
+      <div class="foot">saved · ${nf.format(overview.jev.rerouted)} of ${nf.format(overview.jev.decided)} sessions rerouted</div></div>` : ''}
     ${spend ? `<div class="tile" title="Estimated Cloudflare spend by this tool (Jev + transcript storage) this calendar month, ignoring free allowances, so the real bill is at or below it. Calls stop at the cap.">
       <div class="label">Cloudflare spend · ${esc(spend.month)}</div>
       <div class="value">${money(spend.total_usd)}</div>

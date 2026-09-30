@@ -10,6 +10,7 @@
  *   GET  /api/transcripts/:session         transcript files stored for a session
  *   GET  /api/transcripts/:session/:file   download one (gzip)
  *   GET  /api/spend         this month's estimated Cloudflare spend against the cap
+ *   POST /api/route         Jev's model choice for a session (Bearer token; the plugin proxy)
  *   GET  /                  dashboard
  */
 
@@ -23,6 +24,7 @@ import { openDb, makeStore } from './db.mjs';
 import { loadPricing } from './pricing.mjs';
 import { makeStorage } from './storage.mjs';
 import { makeBudget } from './budget.mjs';
+import { makeJev } from './jev.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -50,6 +52,7 @@ const store = makeStore(db);
 const pricing = loadPricing(path.join(ROOT, 'pricing.json'));
 const storage = makeStorage();
 const budget = makeBudget(db);
+const jev = makeJev(db, budget);
 
 // Transcripts arrive in chunks small enough for the proxy's body limit and are
 // reassembled here before one PUT to R2. Kept beside the database, outside the
@@ -490,8 +493,40 @@ app.get(`${BASE_PATH}/api/overview`, readLimiter, requireDashboardAuth, (req, re
     range: { from: f.from, to: f.to, tz: TZ },
     filter: { developers: f.devs, accounts: f.accts },
     totals, byDeveloper, byDay, byModel, byProject,
+    jev: jevSummary(fs),
   });
 });
+
+/**
+ * What Jev did for the filtered sessions, and what it saved. The saving is the
+ * rerouted sessions' tokens priced at the model Claude Code asked for, minus
+ * what they cost on the model they actually ran on - so it is only as good as
+ * pricing.json, and a downgrade that led to a longer session shows up as a
+ * smaller saving rather than being hidden.
+ */
+function jevSummary(fs) {
+  const rows = db.prepare(
+    `SELECT j.session_id, j.requested_model, j.chosen_model, j.applied, j.cost_usd AS jev_cost
+       FROM jev_decisions j JOIN sessions s ON s.session_id = j.session_id
+      WHERE ${fs.sql}`).all(...fs.args);
+  let saved = 0; let jevCost = 0;
+  const models = db.prepare('SELECT * FROM session_models WHERE session_id = ?');
+  for (const r of rows) {
+    jevCost += r.jev_cost;
+    if (!r.applied || !r.chosen_model) continue;
+    for (const m of models.all(r.session_id)) {
+      if (m.model.replace(/\[[^\]]*\]$/, '') !== r.chosen_model) continue;
+      saved += pricing.costOf(r.requested_model, m) - m.cost_usd;
+    }
+  }
+  return {
+    enabled: jev.enabled,
+    decided: rows.length,
+    rerouted: rows.filter((r) => r.applied).length,
+    saved_usd: saved,
+    jev_cost_usd: jevCost,
+  };
+}
 
 /**
  * Everything the filter dropdowns can offer for the date range, ignoring the
@@ -534,16 +569,19 @@ app.get(`${BASE_PATH}/api/sessions`, readLimiter, requireDashboardAuth, (req, re
     `SELECT session_id, developer_name, developer_email, identity_source, account_email, hostname,
             project_name, project_cwd, git_branch, started_at, last_activity_at, day,
             duration_sec, headline, title, turns, tool_calls,
-            input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-            total_tokens, cost_usd, is_final, end_reason, report_count,
+            sessions.input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+            total_tokens, sessions.cost_usd, is_final, end_reason, report_count,
             -- The model that did most of the work, by cost, plus how many
             -- others the session also touched.
             (SELECT m.model FROM session_models m WHERE m.session_id = sessions.session_id
                AND (m.input_tokens + m.output_tokens + m.cache_creation_tokens + m.cache_read_tokens) > 0
              ORDER BY m.cost_usd DESC, m.requests DESC LIMIT 1) AS primary_model,
             (SELECT COUNT(*) FROM session_models m WHERE m.session_id = sessions.session_id
-               AND (m.input_tokens + m.output_tokens + m.cache_creation_tokens + m.cache_read_tokens) > 0) AS model_count
-       FROM sessions WHERE ${where.join(' AND ')}
+               AND (m.input_tokens + m.output_tokens + m.cache_creation_tokens + m.cache_read_tokens) > 0) AS model_count,
+            j.requested_model AS jev_requested, j.recommended_tier AS jev_tier, j.chosen_model AS jev_chosen,
+            j.applied AS jev_applied, j.confidence AS jev_confidence, j.reason AS jev_reason
+       FROM sessions LEFT JOIN jev_decisions j USING (session_id)
+      WHERE ${where.join(' AND ')}
       ORDER BY started_at DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
 
   res.json({ range: { from, to }, total, limit, offset, sessions: rows });
@@ -557,7 +595,8 @@ app.get(`${BASE_PATH}/api/sessions/:id`, readLimiter, requireDashboardAuth, (req
   let tools = {}; let files = [];
   try { tools = JSON.parse(s.tools_json); } catch {}
   try { files = JSON.parse(s.files_json); } catch {}
-  res.json({ session: s, models, tools, files });
+  const decision = db.prepare('SELECT * FROM jev_decisions WHERE session_id = ?').get(req.params.id) || null;
+  res.json({ session: s, models, tools, files, jev: decision });
 });
 
 /* ------------------------------------------------------------ transcripts */
@@ -671,6 +710,28 @@ app.get(`${BASE_PATH}/api/transcripts/:sid/:file`, readLimiter, requireDashboard
   }
 });
 
+/* ------------------------------------------------------------------- jev */
+
+// The plugin's local proxy calls this on a session's first request and waits
+// for it, so it must answer fast and never fail hard: anything but a clean
+// decision comes back as { model: null } and the request goes out unchanged.
+app.post(`${BASE_PATH}/api/route`, ingestLimiter, requireIngestAuth,
+  express.json({ limit: '160kb' }), async (req, res) => {
+  const b = req.body || {};
+  const sessionId = str(b.session_id, 100);
+  if (!SID_RE.test(sessionId)) return res.status(400).json({ error: 'session_id required' });
+  try {
+    res.json(await jev.decide({
+      sessionId,
+      requestedModel: str(b.requested_model, 120),
+      prompt: typeof b.prompt === 'string' ? b.prompt : '',
+    }));
+  } catch (e) {
+    console.error('[jev] decide failed', e.message);
+    res.json({ final: false, session_id: sessionId, model: null, apply: false, reason: 'internal error' });
+  }
+});
+
 app.get(`${BASE_PATH}/api/spend`, readLimiter, requireDashboardAuth, (_req, res) => {
   res.json({ ...budget.spent(), transcripts_enabled: storage.enabled });
 });
@@ -706,7 +767,7 @@ setInterval(sweepTranscripts, 6 * 3600_000).unref();
 // free query amplifier. The row count moved to /api/stats, behind auth.
 app.get(`${BASE_PATH}/api/health`, readLimiter, (_req, res) => {
   res.json({ ok: true, commit: COMMIT, started_at: STARTED_AT, pricing_updated: pricing.updated, tz: TZ,
-    transcripts: storage.enabled });
+    transcripts: storage.enabled, jev: jev.enabled });
 });
 
 app.get(`${BASE_PATH}/api/stats`, readLimiter, requireDashboardAuth, (_req, res) => {
@@ -728,5 +789,6 @@ app.listen(PORT, HOST, () => {
   if (!INGEST_TOKEN) console.warn('[usage-tracker] WARNING: INGEST_TOKEN unset - the ingest endpoint is open');
   if (!DASHBOARD_USER) console.warn('[usage-tracker] WARNING: DASHBOARD_USER unset - the dashboard is open');
   console.log(`[usage-tracker] transcripts: ${storage.enabled ? `R2 bucket ${storage.bucket}, keep ${TRANSCRIPT_RETENTION_DAYS}d` : 'disabled (R2_* not set)'}; spend cap $${budget.capUsd}/month`);
+  console.log(`[usage-tracker] jev: ${jev.enabled ? `on, ${Object.values(jev.models).join(' / ')}, min confidence ${jev.policy.minConfidence}, upgrades ${jev.policy.allowUpgrade ? 'on' : 'off'}` : 'disabled (CF_ACCOUNT_ID / CF_AI_TOKEN not set)'}`);
   console.log(`[usage-tracker] rate limits: ingest ${INGEST_PER_MIN}/min, read ${READ_PER_MIN}/min per IP; trust proxy=${TRUST_PROXY}`);
 });

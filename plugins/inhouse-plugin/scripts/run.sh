@@ -4,6 +4,7 @@
 # reporter's output is discarded unless CLAUDE_USAGE_DEBUG=1.
 set -u
 SCRIPT="$1"
+shift
 
 resolve_node() {
   if [ -n "${CLAUDE_USAGE_NODE:-}" ] && [ -x "${CLAUDE_USAGE_NODE}" ]; then
@@ -26,8 +27,8 @@ resolve_node() {
 NODE=$(resolve_node) || exit 0
 
 if [ "${CLAUDE_USAGE_DEBUG:-}" = "1" ]; then
-  "$NODE" "$SCRIPT"
+  "$NODE" "$SCRIPT" "$@"
 else
-  "$NODE" "$SCRIPT" >/dev/null 2>&1
+  "$NODE" "$SCRIPT" "$@" >/dev/null 2>&1
 fi
 exit 0

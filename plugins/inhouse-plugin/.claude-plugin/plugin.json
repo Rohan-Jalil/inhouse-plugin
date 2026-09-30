@@ -1,6 +1,6 @@
 {
   "name": "inhouse-plugin",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Reports per-session Claude Code token usage, project, summary and full transcript to the internal usage dashboard.",
   "author": {
     "name": "Step2Compliance"
@@ -9,6 +9,11 @@
     "SessionStart": [
       {
         "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/proxy.mjs\" --ensure",
+            "timeout": 10
+          },
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/run.sh\" \"${CLAUDE_PLUGIN_ROOT}/scripts/report.mjs\"",

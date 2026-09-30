@@ -250,6 +250,13 @@ function tokens(n) {
   if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'K';
   return nf.format(n);
 }
+function bytes(n) {
+  n = Number(n) || 0;
+  if (n >= 1024 ** 3) return (n / 1024 ** 3).toFixed(1) + ' GB';
+  if (n >= 1024 ** 2) return (n / 1024 ** 2).toFixed(1) + ' MB';
+  if (n >= 1024) return Math.round(n / 1024) + ' KB';
+  return n + ' B';
+}
 function money(n) {
   n = Number(n) || 0;
   if (n >= 1000) return '$' + nf.format(Math.round(n));
@@ -485,7 +492,10 @@ async function toggleDetail(tr, id) {
   row.innerHTML = `<td colspan="${SESSION_COLS}">Loading…</td>`;
   tr.after(row);
 
-  const r = await fetch(api(`api/sessions/${encodeURIComponent(id)}`)).then((x) => x.json()).catch(() => null);
+  const [r, tx] = await Promise.all([
+    fetch(api(`api/sessions/${encodeURIComponent(id)}`)).then((x) => x.json()).catch(() => null),
+    fetch(api(`api/transcripts/${encodeURIComponent(id)}`)).then((x) => x.json()).catch(() => null),
+  ]);
   if (!r || r.error) { row.innerHTML = `<td colspan="${SESSION_COLS}">Could not load this session.</td>`; return; }
 
   const s = r.session;
@@ -495,6 +505,12 @@ async function toggleDetail(tr, id) {
     `${esc(m.model)} — ${tokens(m.input_tokens + m.output_tokens + m.cache_creation_tokens + m.cache_read_tokens)} over ${nf.format(m.requests)} requests, ${money(m.cost_usd)}`
   ).join('<br>') || '—';
   const files = r.files.length ? r.files.map((f) => esc(f)).join('<br>') : '—';
+  const live = (tx?.files || []).filter((f) => !f.deleted_at);
+  const transcript = !tx ? '—'
+    : live.length ? live.map((f) => `<a href="${api(`api/transcripts/${encodeURIComponent(id)}/${encodeURIComponent(f.file)}`)}" download>${esc(f.file)}</a>
+        <span style="color:var(--text-muted)">· ${bytes(f.raw_bytes)} · ${when(f.uploaded_at)}</span>`).join('<br>')
+    : (tx.files || []).length ? `Removed after ${tx.retention_days} days`
+    : tx.enabled ? 'Not uploaded yet (uploads when the session ends)' : 'Transcript storage is not configured on the server';
 
   row.innerHTML = `<td colspan="${SESSION_COLS}"><dl class="kv">
     <dt>Session</dt><dd class="mono">${esc(s.session_id)}</dd>
@@ -507,6 +523,7 @@ async function toggleDetail(tr, id) {
     <dt>By model</dt><dd>${models}</dd>
     <dt>Tools</dt><dd>${tools}</dd>
     <dt>Files touched</dt><dd class="mono">${files}</dd>
+    <dt>Transcript</dt><dd class="mono">${transcript}</dd>
     <dt>Reports</dt><dd>${nf.format(s.report_count)} · ${s.is_final ? `ended (${esc(s.end_reason || 'end')})` : 'still open or ended without a final report'}</dd>
   </dl></td>`;
 }
@@ -520,7 +537,10 @@ function qs() {
 }
 
 async function load() {
-  const overview = await fetch(api(`api/overview?${qs()}`)).then((r) => r.json());
+  const [overview, spend] = await Promise.all([
+    fetch(api(`api/overview?${qs()}`)).then((r) => r.json()),
+    fetch(api('api/spend')).then((r) => r.json()).catch(() => null),
+  ]);
   const t = overview.totals;
   document.getElementById('tz').textContent = overview.range.tz;
   document.getElementById('range-sub').textContent =
@@ -535,7 +555,11 @@ async function load() {
     <div class="tile"><div class="label">Est. API cost</div><div class="value">${money(t.cost_usd)}</div>
       <div class="foot">list price equivalent</div></div>
     <div class="tile"><div class="label">Developers</div><div class="value">${nf.format(t.developers)}</div>
-      <div class="foot">on ${nf.format(t.accounts)} Claude account${t.accounts === 1 ? '' : 's'}</div></div>`;
+      <div class="foot">on ${nf.format(t.accounts)} Claude account${t.accounts === 1 ? '' : 's'}</div></div>
+    ${spend ? `<div class="tile" title="Estimated Cloudflare spend by this tool (Jev + transcript storage) this calendar month, ignoring free allowances, so the real bill is at or below it. Calls stop at the cap.">
+      <div class="label">Cloudflare spend · ${esc(spend.month)}</div>
+      <div class="value">${money(spend.total_usd)}</div>
+      <div class="foot">of ${money(spend.cap_usd)} cap${spend.cap_usd > 0 ? ` · ${Math.min(100, (spend.total_usd / spend.cap_usd) * 100).toFixed(spend.total_usd / spend.cap_usd < 0.01 ? 2 : 0)}%` : ''}${spend.transcripts_enabled ? '' : ' · storage off'}</div></div>` : ''}`;
 
   // Roll the per-developer day rows up to one bar per day.
   const perDay = new Map();

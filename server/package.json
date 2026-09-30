@@ -9,6 +9,11 @@
     "start": "node src/server.mjs",
     "dev": "node --watch src/server.mjs"
   },
-  "engines": { "node": ">=22.5" },
-  "dependencies": { "express": "^4.21.2" }
+  "engines": {
+    "node": ">=22.5"
+  },
+  "dependencies": {
+    "aws4fetch": "^1.0.20",
+    "express": "^4.21.2"
+  }
 }

@@ -23,8 +23,20 @@ Config lives at `~/.config/claude-usage-tracker/config.json`:
 |---|---|
 | `enabled` | set `false` to stop reporting |
 | `flushIntervalSec` | how often a running session reports (default 60) |
-| `redactContent` | send counts only — no titles or prompts |
+| `redactContent` | send counts only — no titles, prompts or transcripts |
 | `captureLastReply` | include Claude's last reply (off by default) |
+| `uploadTranscripts` | set `false` to stop uploading full transcripts |
+
+At the end of each session the full transcript (plus subagent transcripts) is
+gzipped and uploaded in the background, so it never slows the session down. If
+the server can't take it yet, it waits in `~/.cache/claude-usage-tracker/uploads`
+(capped at 300 MB) and retries later.
+
+Update to the latest version:
+
+```bash
+claude plugin marketplace update inhouse-plugin && claude plugin update inhouse-plugin@inhouse-plugin
+```
 
 Remove entirely with `claude plugin uninstall inhouse-plugin@inhouse-plugin`.
 
@@ -42,9 +54,23 @@ node --env-file=.env src/server.mjs
 |---|---|
 | `POST /api/ingest` | session reports (Bearer token) |
 | `GET /api/overview` | totals, per-developer and per-day rollups |
-| `GET /api/sessions` | filtered session list |
+| `GET /api/sessions` | filtered session list (`developer=`, `account=` take several, comma-separated) |
+| `GET /api/filters` | developers and accounts in a date range |
+| `POST /api/transcripts/:session/:file` | one ≤1 MB chunk of a gzipped transcript (Bearer token) |
+| `GET /api/transcripts/:session[/:file]` | list / download stored transcripts (login required) |
+| `GET /api/spend` | this month's estimated Cloudflare spend against the cap |
 | `GET /api/health` | liveness, no auth |
 | `GET /` | dashboard (login required) |
+
+**Transcripts** are stored in Cloudflare R2 when `R2_ACCOUNT_ID`, `R2_BUCKET`,
+`R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` are set; without them the upload
+route answers 503 and clients keep their copy. They are deleted after
+`TRANSCRIPT_RETENTION_DAYS` (default 90).
+
+**Spend cap.** Cloudflare has no hard spending limit, so the server enforces one:
+every R2 (and Jev) call is estimated first and refused once the month's total
+would pass `SPEND_CAP_USD` (default 10). Estimates ignore Cloudflare's free
+allowances, so the real bill is at or below the figure shown.
 
 Put TLS in front of it, and keep it off the open internet if you can — reports
 contain prompt text. `BASE_PATH` mounts it under a sub-path behind a shared

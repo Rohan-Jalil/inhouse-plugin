@@ -6,6 +6,10 @@
  *   GET  /api/sessions      filtered session list
  *   GET  /api/sessions/:id  one session with per-model + tool breakdown
  *   GET  /api/filters       developers and accounts available in a date range
+ *   POST /api/transcripts/:session/:file   one chunk of a gzipped transcript (Bearer token)
+ *   GET  /api/transcripts/:session         transcript files stored for a session
+ *   GET  /api/transcripts/:session/:file   download one (gzip)
+ *   GET  /api/spend         this month's estimated Cloudflare spend against the cap
  *   GET  /                  dashboard
  */
 
@@ -14,8 +18,11 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import fs from 'node:fs';
 import { openDb, makeStore } from './db.mjs';
 import { loadPricing } from './pricing.mjs';
+import { makeStorage } from './storage.mjs';
+import { makeBudget } from './budget.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
@@ -41,6 +48,16 @@ const COOKIE = 'usage_session';
 const db = openDb(DB_FILE);
 const store = makeStore(db);
 const pricing = loadPricing(path.join(ROOT, 'pricing.json'));
+const storage = makeStorage();
+const budget = makeBudget(db);
+
+// Transcripts arrive in chunks small enough for the proxy's body limit and are
+// reassembled here before one PUT to R2. Kept beside the database, outside the
+// checkout, so a deploy never wipes an upload in progress.
+const TRANSCRIPT_TMP = process.env.TRANSCRIPT_TMP_DIR || path.join(path.dirname(DB_FILE), 'upload-tmp');
+const TRANSCRIPT_RETENTION_DAYS = Number(process.env.TRANSCRIPT_RETENTION_DAYS ?? 90);
+const MAX_TRANSCRIPT_BYTES = Number(process.env.MAX_TRANSCRIPT_MB || 200) * 1024 * 1024;
+const CHUNK_LIMIT = '1536kb';
 
 /** Commit currently running, so a deploy can be verified from outside the box. */
 const COMMIT = (() => {
@@ -543,10 +560,153 @@ app.get(`${BASE_PATH}/api/sessions/:id`, readLimiter, requireDashboardAuth, (req
   res.json({ session: s, models, tools, files });
 });
 
+/* ------------------------------------------------------------ transcripts */
+
+const SID_RE = /^[A-Za-z0-9-]{1,100}$/;
+const FILE_RE = /^(main|agent-[A-Za-z0-9_-]{1,80})\.jsonl$/;
+
+/**
+ * Receives one chunk of a gzipped transcript file. The client sends
+ * ?part=N&parts=M&sha256=<hex of the whole .gz>&raw=<uncompressed bytes>.
+ * When the last missing part arrives the file is reassembled, its hash checked,
+ * and it is written to R2 in one PUT.
+ */
+app.post(`${BASE_PATH}/api/transcripts/:sid/:file`, ingestLimiter, requireIngestAuth,
+  express.raw({ type: () => true, limit: CHUNK_LIMIT }), async (req, res) => {
+  if (!storage.enabled) return res.status(503).json({ error: 'transcript storage is not configured' });
+
+  const { sid, file } = req.params;
+  const part = int(req.query.part), parts = int(req.query.parts);
+  const sha = String(req.query.sha256 || '').toLowerCase();
+  const raw = int(req.query.raw);
+  if (!SID_RE.test(sid) || !FILE_RE.test(file)) return res.status(400).json({ error: 'bad session or file name' });
+  if (!(parts >= 1 && parts <= 1000 && part < parts) || !/^[0-9a-f]{64}$/.test(sha)) {
+    return res.status(400).json({ error: 'part, parts and sha256 are required' });
+  }
+  if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.status(400).json({ error: 'empty chunk' });
+
+  // Already stored with this exact content: nothing to do (idempotent retries).
+  const existing = db.prepare('SELECT sha256 FROM transcripts WHERE session_id = ? AND file = ? AND deleted_at = \'\'').get(sid, file);
+  if (existing?.sha256 === sha) return res.json({ ok: true, complete: true, unchanged: true });
+
+  // One directory per upload attempt, keyed by content hash, so two different
+  // versions of the same file can never interleave their chunks.
+  const dir = path.join(TRANSCRIPT_TMP, sid, `${file}.${sha}`);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, `${part}.part`), req.body);
+
+    // Tell the client exactly which parts are still needed, so a client that
+    // resumed after this server discarded or never got earlier parts can fill
+    // the gaps instead of assuming they are here.
+    const missing = [];
+    for (let i = 0; i < parts; i++) if (!fs.existsSync(path.join(dir, `${i}.part`))) missing.push(i);
+    if (missing.length) return res.json({ ok: true, complete: false, parts, missing: missing.slice(0, 50) });
+
+    const chunks = [];
+    for (let i = 0; i < parts; i++) chunks.push(fs.readFileSync(path.join(dir, `${i}.part`)));
+    const gz = Buffer.concat(chunks);
+    if (gz.length > MAX_TRANSCRIPT_BYTES) {
+      fs.rmSync(dir, { recursive: true, force: true });
+      return res.status(413).json({ error: 'transcript too large' });
+    }
+    const got = crypto.createHash('sha256').update(gz).digest('hex');
+    if (got !== sha) {
+      fs.rmSync(dir, { recursive: true, force: true });
+      return res.status(422).json({ error: 'checksum mismatch; resend the file' });
+    }
+
+    const est = budget.est.r2Write(1) + budget.est.r2Storage(gz.length);
+    if (!budget.allow(est)) {
+      // Parts are kept so the upload can finish next month without resending;
+      // the sweep removes them if nobody comes back within a day.
+      return res.status(402).json({ error: 'monthly Cloudflare spend cap reached', spend: budget.spent() });
+    }
+
+    const s = db.prepare('SELECT developer_email, day FROM sessions WHERE session_id = ?').get(sid);
+    const who = (s?.developer_email || 'unknown').replace(/[^A-Za-z0-9@._-]/g, '_');
+    const day = s?.day || new Date().toISOString().slice(0, 10);
+    const key = `${who}/${day}/${sid}/${file}.gz`;
+
+    await storage.put(key, gz);
+    budget.record('r2_write', 1, budget.est.r2Write(1));
+    db.prepare(`
+      INSERT INTO transcripts (session_id, file, r2_key, gz_bytes, raw_bytes, sha256, uploaded_at, deleted_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, '')
+      ON CONFLICT(session_id, file) DO UPDATE SET
+        r2_key = excluded.r2_key, gz_bytes = excluded.gz_bytes, raw_bytes = excluded.raw_bytes,
+        sha256 = excluded.sha256, uploaded_at = excluded.uploaded_at, deleted_at = ''`)
+      .run(sid, file, key, gz.length, raw, sha, new Date().toISOString());
+    fs.rmSync(dir, { recursive: true, force: true });
+    res.json({ ok: true, complete: true, bytes: gz.length });
+  } catch (e) {
+    console.error('[transcripts] upload failed', e.message);
+    res.status(502).json({ error: 'upload failed; retry later' });
+  }
+});
+
+app.get(`${BASE_PATH}/api/transcripts/:sid`, readLimiter, requireDashboardAuth, (req, res) => {
+  const files = db.prepare(
+    `SELECT file, gz_bytes, raw_bytes, uploaded_at, deleted_at FROM transcripts
+      WHERE session_id = ? ORDER BY file = 'main.jsonl' DESC, file`).all(req.params.sid);
+  res.json({ enabled: storage.enabled, retention_days: TRANSCRIPT_RETENTION_DAYS, files });
+});
+
+app.get(`${BASE_PATH}/api/transcripts/:sid/:file`, readLimiter, requireDashboardAuth, async (req, res) => {
+  const t = db.prepare(
+    "SELECT r2_key FROM transcripts WHERE session_id = ? AND file = ? AND deleted_at = ''")
+    .get(req.params.sid, req.params.file);
+  if (!t) return res.status(404).json({ error: 'not stored' });
+  if (!storage.enabled) return res.status(503).json({ error: 'transcript storage is not configured' });
+  if (!budget.allow(budget.est.r2Read(1))) return res.status(402).json({ error: 'monthly Cloudflare spend cap reached' });
+  try {
+    const r = await storage.get(t.r2_key);
+    budget.record('r2_read', 1, budget.est.r2Read(1));
+    res.set('content-type', 'application/gzip');
+    res.set('content-disposition', `attachment; filename="${req.params.sid}-${req.params.file}.gz"`);
+    res.send(Buffer.from(await r.arrayBuffer()));
+  } catch (e) {
+    console.error('[transcripts] download failed', e.message);
+    res.status(502).json({ error: 'download failed' });
+  }
+});
+
+app.get(`${BASE_PATH}/api/spend`, readLimiter, requireDashboardAuth, (_req, res) => {
+  res.json({ ...budget.spent(), transcripts_enabled: storage.enabled });
+});
+
+/** Retention: remove transcripts older than the window, and abandoned partial uploads. */
+async function sweepTranscripts() {
+  try {
+    if (storage.enabled && TRANSCRIPT_RETENTION_DAYS > 0) {
+      const cutoff = new Date(Date.now() - TRANSCRIPT_RETENTION_DAYS * 86400_000).toISOString();
+      const old = db.prepare("SELECT session_id, file, r2_key FROM transcripts WHERE deleted_at = '' AND uploaded_at < ?").all(cutoff);
+      for (const t of old) {
+        await storage.del(t.r2_key); // R2 deletes are free, so nothing is booked
+        db.prepare('UPDATE transcripts SET deleted_at = ? WHERE session_id = ? AND file = ?')
+          .run(new Date().toISOString(), t.session_id, t.file);
+      }
+      if (old.length) console.log(`[transcripts] retention removed ${old.length} file(s) older than ${TRANSCRIPT_RETENTION_DAYS}d`);
+    }
+    if (fs.existsSync(TRANSCRIPT_TMP)) {
+      const stale = Date.now() - 86400_000;
+      for (const sid of fs.readdirSync(TRANSCRIPT_TMP)) {
+        const d = path.join(TRANSCRIPT_TMP, sid);
+        if (fs.statSync(d).mtimeMs < stale) fs.rmSync(d, { recursive: true, force: true });
+      }
+    }
+  } catch (e) {
+    console.error('[transcripts] sweep failed', e.message);
+  }
+}
+setTimeout(sweepTranscripts, 60_000).unref();
+setInterval(sweepTranscripts, 6 * 3600_000).unref();
+
 // Liveness only - deliberately does no database work, so it can't be used as a
 // free query amplifier. The row count moved to /api/stats, behind auth.
 app.get(`${BASE_PATH}/api/health`, readLimiter, (_req, res) => {
-  res.json({ ok: true, commit: COMMIT, started_at: STARTED_AT, pricing_updated: pricing.updated, tz: TZ });
+  res.json({ ok: true, commit: COMMIT, started_at: STARTED_AT, pricing_updated: pricing.updated, tz: TZ,
+    transcripts: storage.enabled });
 });
 
 app.get(`${BASE_PATH}/api/stats`, readLimiter, requireDashboardAuth, (_req, res) => {
@@ -567,5 +727,6 @@ app.listen(PORT, HOST, () => {
   console.log(`[usage-tracker] db=${DB_FILE} tz=${TZ} commit=${COMMIT} basePath=${BASE_PATH || '/'}`);
   if (!INGEST_TOKEN) console.warn('[usage-tracker] WARNING: INGEST_TOKEN unset - the ingest endpoint is open');
   if (!DASHBOARD_USER) console.warn('[usage-tracker] WARNING: DASHBOARD_USER unset - the dashboard is open');
+  console.log(`[usage-tracker] transcripts: ${storage.enabled ? `R2 bucket ${storage.bucket}, keep ${TRANSCRIPT_RETENTION_DAYS}d` : 'disabled (R2_* not set)'}; spend cap $${budget.capUsd}/month`);
   console.log(`[usage-tracker] rate limits: ingest ${INGEST_PER_MIN}/min, read ${READ_PER_MIN}/min per IP; trust proxy=${TRUST_PROXY}`);
 });

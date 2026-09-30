@@ -85,6 +85,21 @@ CREATE TABLE IF NOT EXISTS session_models (
 );
 
 CREATE INDEX IF NOT EXISTS idx_models_model ON session_models(model);
+
+-- One row per transcript file stored in R2: the main session transcript plus
+-- one per subagent. Re-uploading a resumed session overwrites in place.
+CREATE TABLE IF NOT EXISTS transcripts (
+  session_id   TEXT NOT NULL,
+  file         TEXT NOT NULL,            -- main.jsonl | agent-<id>.jsonl
+  r2_key       TEXT NOT NULL,
+  gz_bytes     INTEGER NOT NULL DEFAULT 0,
+  raw_bytes    INTEGER NOT NULL DEFAULT 0,
+  sha256       TEXT NOT NULL DEFAULT '',
+  uploaded_at  TEXT NOT NULL DEFAULT '',
+  deleted_at   TEXT NOT NULL DEFAULT '', -- set when retention removes it from R2
+  PRIMARY KEY (session_id, file)
+);
+CREATE INDEX IF NOT EXISTS idx_transcripts_uploaded ON transcripts(uploaded_at);
 `;
 
 export function openDb(file) {

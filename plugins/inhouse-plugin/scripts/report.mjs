@@ -6,6 +6,10 @@
  * incrementally, aggregates token usage and a cheap activity summary, and POSTs
  * it to the internal usage API.
  *
+ * On SessionEnd it also queues the full transcript (main + subagent files,
+ * gzipped) for upload. Uploading happens in a detached background process
+ * (`report.mjs --upload`) so no hook ever waits on the network.
+ *
  * Design rules:
  *  - Never throw. A telemetry hook must not be able to break someone's session.
  *  - Never write to stdout. SessionStart stdout is injected into the model's
@@ -18,11 +22,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import zlib from 'node:zlib';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const HOME = os.homedir();
 const CONFIG_DIR = path.join(process.env.XDG_CONFIG_HOME || path.join(HOME, '.config'), 'claude-usage-tracker');
 const STATE_DIR = path.join(process.env.XDG_CACHE_HOME || path.join(HOME, '.cache'), 'claude-usage-tracker');
 const SPOOL_DIR = path.join(STATE_DIR, 'spool');
+const UPLOAD_DIR = path.join(STATE_DIR, 'uploads');
+const UPLOAD_LOCK = path.join(STATE_DIR, 'uploader.lock');
 
 const MAX_PROMPT_CHARS = 400;
 const MAX_FILES = 40;
@@ -30,6 +39,11 @@ const MAX_AGENT_FILES = 400;
 const MAX_SPOOL_FILES = 200;
 const SPOOL_FLUSH_PER_RUN = 20;
 const HTTP_TIMEOUT_MS = 4000;
+// Transcript uploads: small chunks fit under the reverse proxy's body limit.
+const CHUNK_BYTES = 1024 * 1024;
+const CHUNK_TIMEOUT_MS = 20000;
+const MAX_UPLOAD_QUEUE_BYTES = 300 * 1024 * 1024;
+const UPLOADER_MAX_RUN_MS = 10 * 60 * 1000;
 
 const debug = (...a) => { if (process.env.CLAUDE_USAGE_DEBUG === '1') console.error('[usage-tracker]', ...a); };
 
@@ -70,6 +84,9 @@ function loadConfig() {
     // just generated or read (keys, tokens, credentials), and title +
     // first_prompt already answer "what was this session about". Opt in.
     captureLastReply: file.captureLastReply === true,
+    // Full transcripts go to the team's storage at session end. Off when
+    // redactContent is set, since a transcript is nothing but content.
+    uploadTranscripts: file.uploadTranscripts !== false && file.redactContent !== true,
   };
   return cfg;
 }
@@ -379,6 +396,157 @@ async function flushSpool(cfg) {
   }
 }
 
+/* -------------------------------------------------------------- transcripts */
+
+const transcriptsUrl = (cfg, sid, file) =>
+  `${cfg.endpoint.replace(/\/api\/ingest\/?$/, '')}/api/transcripts/${encodeURIComponent(sid)}/${encodeURIComponent(file)}`;
+
+/**
+ * Gzip the session's transcript files into the upload queue. A re-queued file
+ * (a resumed session ending again) replaces the earlier version.
+ */
+function queueTranscripts(sessionId, transcriptPath) {
+  const files = [{ name: 'main.jsonl', src: transcriptPath },
+    ...subagentFiles(transcriptPath, sessionId).map(({ file }) => ({ name: path.basename(file), src: file }))];
+  const dir = path.join(UPLOAD_DIR, sessionId);
+  let queued = 0;
+  for (const f of files) {
+    try {
+      const raw = fs.readFileSync(f.src);
+      if (!raw.length) continue;
+      const gz = zlib.gzipSync(raw, { level: 6 });
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, `${f.name}.gz`), gz);
+      writeJSONSafe(path.join(dir, `${f.name}.meta.json`), {
+        session_id: sessionId, file: f.name, raw: raw.length, gz: gz.length,
+        sha256: crypto.createHash('sha256').update(gz).digest('hex'),
+        next_part: 0, queued_at: new Date().toISOString(),
+      });
+      queued++;
+    } catch (e) { debug('queue failed', f.src, e.message); }
+  }
+  trimUploadQueue();
+  return queued;
+}
+
+/** Every queued upload, oldest first. */
+function listQueue() {
+  const out = [];
+  let sids = [];
+  try { sids = fs.readdirSync(UPLOAD_DIR); } catch { return out; }
+  for (const sid of sids) {
+    const dir = path.join(UPLOAD_DIR, sid);
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { continue; }
+    for (const n of names.filter((x) => x.endsWith('.meta.json'))) {
+      const meta = readJSONSafe(path.join(dir, n));
+      const gzPath = path.join(dir, n.replace(/\.meta\.json$/, '.gz'));
+      if (!meta || !fs.existsSync(gzPath)) { try { fs.unlinkSync(path.join(dir, n)); } catch {} continue; }
+      out.push({ meta, metaPath: path.join(dir, n), gzPath, dir });
+    }
+  }
+  return out.sort((a, b) => a.meta.queued_at.localeCompare(b.meta.queued_at));
+}
+
+function dropItem(item) {
+  for (const p of [item.gzPath, item.metaPath]) { try { fs.unlinkSync(p); } catch {} }
+  try { if (!fs.readdirSync(item.dir).length) fs.rmdirSync(item.dir); } catch {}
+}
+
+/** Keep the queue bounded if the server is unreachable for a long time. */
+function trimUploadQueue() {
+  const q = listQueue();
+  let total = q.reduce((a, i) => a + (i.meta.gz || 0), 0);
+  for (const item of q) {
+    if (total <= MAX_UPLOAD_QUEUE_BYTES) break;
+    total -= item.meta.gz || 0;
+    debug('queue over limit, dropping', item.meta.session_id, item.meta.file);
+    dropItem(item);
+  }
+}
+
+async function postChunk(cfg, item, part, parts, body) {
+  const url = new URL(transcriptsUrl(cfg, item.meta.session_id, item.meta.file));
+  url.search = new URLSearchParams({ part, parts, sha256: item.meta.sha256, raw: item.meta.raw }).toString();
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), CHUNK_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream', ...(cfg.token ? { authorization: `Bearer ${cfg.token}` } : {}) },
+      body, signal: ctl.signal,
+    });
+    const j = await res.json().catch(() => ({}));
+    return { status: res.status, body: j };
+  } catch (e) {
+    return { status: 0, body: { error: e.message } };
+  } finally { clearTimeout(timer); }
+}
+
+/**
+ * Sends every queued transcript. Returns early, keeping the queue, when the
+ * server says storage isn't set up yet (503), the spend cap is reached (402),
+ * or it can't be reached at all - the next session end tries again.
+ */
+async function drainUploads(cfg) {
+  const started = Date.now();
+  for (const item of listQueue()) {
+    const gz = fs.readFileSync(item.gzPath);
+    const parts = Math.max(1, Math.ceil(gz.length / CHUNK_BYTES));
+    let part = Math.min(item.meta.next_part || 0, parts - 1);
+    // Each part is sent at most a few times per run, so a server that keeps
+    // losing parts can't trap the uploader in a loop.
+    for (let sends = 0; sends < parts * 3; sends++) {
+      if (Date.now() - started > UPLOADER_MAX_RUN_MS) return;
+      const r = await postChunk(cfg, item, part, parts, gz.subarray(part * CHUNK_BYTES, (part + 1) * CHUNK_BYTES));
+      debug('chunk', item.meta.session_id, item.meta.file, `${part + 1}/${parts}`, r.status, JSON.stringify(r.body));
+      if (r.status === 200 && r.body.complete) { dropItem(item); break; }
+      if (r.status === 200) {
+        // Next part in order; once past the end, whatever the server says it lacks.
+        const missing = Array.isArray(r.body.missing) ? r.body.missing.filter((n) => Number.isInteger(n) && n >= 0 && n < parts) : [];
+        part = part + 1 < parts ? part + 1 : (missing[0] ?? 0);
+        item.meta.next_part = part; writeJSONSafe(item.metaPath, item.meta);
+        continue;
+      }
+      if (r.status === 422) { item.meta.next_part = 0; writeJSONSafe(item.metaPath, item.meta); break; } // resend whole file next run
+      if (r.status === 400 || r.status === 413 || r.status === 404) { dropItem(item); break; } // server will never accept it
+      return; // 0 / 401 / 402 / 429 / 5xx: stop, keep everything, retry on a later run
+    }
+  }
+}
+
+/** Starts the background uploader unless one is already running. */
+function startUploader() {
+  try {
+    const lock = readJSONSafe(UPLOAD_LOCK);
+    if (lock?.pid) {
+      try { process.kill(lock.pid, 0); if (Date.now() - lock.at < UPLOADER_MAX_RUN_MS + 60000) return; } catch { /* stale */ }
+    }
+    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--upload'], {
+      detached: true, stdio: 'ignore', env: process.env,
+    });
+    child.unref();
+  } catch (e) { debug('uploader spawn failed', e.message); }
+}
+
+async function uploaderMain() {
+  const cfg = loadConfig();
+  if (!cfg.enabled || !cfg.endpoint) return;
+  fs.mkdirSync(STATE_DIR, { recursive: true });
+  // O_EXCL-style lock: whoever creates the file first owns the run.
+  const mine = { pid: process.pid, at: Date.now() };
+  try {
+    const lock = readJSONSafe(UPLOAD_LOCK);
+    if (lock?.pid && lock.pid !== process.pid) {
+      try { process.kill(lock.pid, 0); if (Date.now() - lock.at < UPLOADER_MAX_RUN_MS + 60000) return; } catch { /* stale */ }
+    }
+    writeJSONSafe(UPLOAD_LOCK, mine);
+    await drainUploads(cfg);
+  } finally {
+    if (readJSONSafe(UPLOAD_LOCK)?.pid === process.pid) { try { fs.unlinkSync(UPLOAD_LOCK); } catch {} }
+  }
+}
+
 /* --------------------------------------------------------------------- main */
 
 function readStdin() {
@@ -464,6 +632,13 @@ async function main() {
 
   // Session is over; the incremental state has no further use.
   if (isFinal) { try { fs.unlinkSync(statePath); } catch {} }
+
+  if (cfg.uploadTranscripts) {
+    if (isFinal) queueTranscripts(sessionId, transcriptPath);
+    // Also nudge any backlog left by an earlier run (e.g. server was down).
+    if (isFinal || event === 'SessionStart') { if (isFinal || listQueue().length) startUploader(); }
+  }
 }
 
-main().catch((e) => debug('fatal', e?.message)).finally(() => process.exit(0));
+const entry = process.argv.includes('--upload') ? uploaderMain : main;
+entry().catch((e) => debug('fatal', e?.message)).finally(() => process.exit(0));

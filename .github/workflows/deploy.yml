@@ -57,12 +57,18 @@ jobs:
         env:
           ANY_SECRET: ${{ secrets.R2_ACCOUNT_ID }}${{ secrets.CF_AI_TOKEN }}
         run: |
-          if [ -z "${CA_URL}" ] || [ -z "${CA_FINGERPRINT}" ] || [ -z "${DEPLOY_HOST}" ]; then
+          missing=""
+          for n in CA_URL CA_FINGERPRINT DEPLOY_HOST; do [ -n "${!n:-}" ] || missing="$missing $n"; done
+          present=""
+          for n in CA_URL CA_FINGERPRINT DEPLOY_HOST CA_PROVISIONER DEPLOY_USER; do [ -n "${!n:-}" ] && present="$present $n"; done
+          echo "Deploy target values found:${present:- none}"
+          if [ -n "$missing" ]; then
+            echo "Missing:$missing"
             echo "configured=false" >> "$GITHUB_OUTPUT"
             echo "::notice::No deploy target configured (repository variables CA_URL, CA_FINGERPRINT, DEPLOY_HOST). The host pulls origin/main on a timer, so this commit still deploys."
             # The timer can pull code but never secrets - those only travel this way.
             if [ -n "${ANY_SECRET}" ]; then
-              echo "::error::Server secrets are set but the deploy target is not, so they cannot reach the server. Add CA_URL, CA_FINGERPRINT and DEPLOY_HOST (as repository variables or secrets)."
+              echo "::error::Server secrets are set but these deploy-target values are missing:$missing (add them as repository variables or secrets, exact names)"
               exit 1
             fi
           else

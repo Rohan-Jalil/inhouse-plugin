@@ -9,6 +9,7 @@
  *   POST /api/transcripts/:session/:file   one chunk of a gzipped transcript (Bearer token)
  *   GET  /api/transcripts/:session         transcript files stored for a session
  *   GET  /api/transcripts/:session/:file   download one (gzip)
+ *   GET  /transcripts/:session/:file       read one in the browser (?page=N)
  *   GET  /api/spend         this month's estimated Cloudflare spend against the cap
  *   POST /api/route         Jev's model choice for a session (Bearer token; the plugin proxy)
  *   GET  /                  dashboard
@@ -20,6 +21,8 @@ import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
+import zlib from 'node:zlib';
+import { renderTranscript } from './transcript-view.mjs';
 import { openDb, makeStore } from './db.mjs';
 import { loadPricing } from './pricing.mjs';
 import { makeStorage } from './storage.mjs';
@@ -665,7 +668,7 @@ app.post(`${BASE_PATH}/api/transcripts/:sid/:file`, ingestLimiter, requireIngest
     const s = db.prepare('SELECT developer_email, day FROM sessions WHERE session_id = ?').get(sid);
     const who = (s?.developer_email || 'unknown').replace(/[^A-Za-z0-9@._-]/g, '_');
     const day = s?.day || new Date().toISOString().slice(0, 10);
-    const key = `${who}/${day}/${sid}/${file}.gz`;
+    const key = `sessions/${who}/${day}/${sid}/${file}.gz`;
 
     await storage.put(key, gz);
     budget.record('r2_write', 1, budget.est.r2Write(1));
@@ -729,6 +732,32 @@ app.post(`${BASE_PATH}/api/route`, ingestLimiter, requireIngestAuth,
   } catch (e) {
     console.error('[jev] decide failed', e.message);
     res.json({ final: false, session_id: sessionId, model: null, apply: false, reason: 'internal error' });
+  }
+});
+
+// Readable view of a stored transcript. Server-rendered, escaped HTML with a
+// CSP that forbids scripts, so transcript content can never run in the page.
+app.get(`${BASE_PATH}/transcripts/:sid/:file`, readLimiter, requireDashboardAuth, async (req, res) => {
+  const t = db.prepare(
+    "SELECT r2_key, raw_bytes, uploaded_at FROM transcripts WHERE session_id = ? AND file = ? AND deleted_at = ''")
+    .get(req.params.sid, req.params.file);
+  if (!t) return res.status(404).type('text').send('Transcript not stored (or removed after the retention period).');
+  if (!storage.enabled) return res.status(503).type('text').send('Transcript storage is not configured.');
+  if (!budget.allow(budget.est.r2Read(1))) return res.status(402).type('text').send('Monthly Cloudflare spend cap reached.');
+  try {
+    const r = await storage.get(t.r2_key);
+    budget.record('r2_read', 1, budget.est.r2Read(1));
+    const raw = zlib.gunzipSync(Buffer.from(await r.arrayBuffer())).toString('utf8');
+    const s = db.prepare('SELECT developer_name, developer_email, project_name, title, headline, started_at FROM sessions WHERE session_id = ?').get(req.params.sid) || {};
+    res.set('content-security-policy', "default-src 'none'; style-src 'unsafe-inline'; img-src data:");
+    res.set('x-content-type-options', 'nosniff');
+    res.type('html').send(renderTranscript(raw, {
+      sessionId: req.params.sid, file: req.params.file, session: s, uploadedAt: t.uploaded_at,
+      page: int(req.query.page) || 1, basePath: BASE_PATH,
+    }));
+  } catch (e) {
+    console.error('[transcripts] view failed', e.message);
+    res.status(502).type('text').send('Could not load this transcript.');
   }
 });
 

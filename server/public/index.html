@@ -517,7 +517,8 @@ async function toggleDetail(tr, id) {
   const files = r.files.length ? r.files.map((f) => esc(f)).join('<br>') : '—';
   const live = (tx?.files || []).filter((f) => !f.deleted_at);
   const transcript = !tx ? '—'
-    : live.length ? live.map((f) => `<a href="${api(`api/transcripts/${encodeURIComponent(id)}/${encodeURIComponent(f.file)}`)}" download>${esc(f.file)}</a>
+    : live.length ? live.map((f) => `${esc(f.file)} · <a href="${api(`transcripts/${encodeURIComponent(id)}/${encodeURIComponent(f.file)}`)}" target="_blank" rel="noopener">View</a>
+        · <a href="${api(`api/transcripts/${encodeURIComponent(id)}/${encodeURIComponent(f.file)}`)}" download>Download</a>
         <span style="color:var(--text-muted)">· ${bytes(f.raw_bytes)} · ${when(f.uploaded_at)}</span>`).join('<br>')
     : (tx.files || []).length ? `Removed after ${tx.retention_days} days`
     : tx.enabled ? 'Not uploaded yet (uploads when the session ends)' : 'Transcript storage is not configured on the server';

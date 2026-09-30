@@ -83,6 +83,7 @@ node --env-file=.env src/server.mjs
 | `GET /api/filters` | developers and accounts in a date range |
 | `POST /api/transcripts/:session/:file` | one ≤1 MB chunk of a gzipped transcript (Bearer token) |
 | `GET /api/transcripts/:session[/:file]` | list / download stored transcripts (login required) |
+| `GET /transcripts/:session/:file` | read a stored transcript in the browser (login required) |
 | `GET /api/spend` | this month's estimated Cloudflare spend against the cap |
 | `POST /api/route` | Jev's model choice for a session (Bearer token; used by the proxy) |
 | `GET /api/health` | liveness, no auth |
@@ -90,7 +91,10 @@ node --env-file=.env src/server.mjs
 
 **Transcripts** are stored in Cloudflare R2 when `R2_ACCOUNT_ID`, `R2_BUCKET`,
 `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` are set; without them the upload
-route answers 503 and clients keep their copy. They are deleted after
+route answers 503 and clients keep their copy. Objects are stored as
+`sessions/<developer email>/<YYYY-MM-DD>/<session id>/main.jsonl.gz` plus one
+`agent-<id>.jsonl.gz` per subagent; the dashboard links to each (View /
+Download) through the server, since the bucket stays private. They are deleted after
 `TRANSCRIPT_RETENTION_DAYS` (default 90).
 
 On the deployed server these credentials are repository **secrets**, written

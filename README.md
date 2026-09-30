@@ -93,6 +93,12 @@ node --env-file=.env src/server.mjs
 route answers 503 and clients keep their copy. They are deleted after
 `TRANSCRIPT_RETENTION_DAYS` (default 90).
 
+On the deployed server these credentials are repository **secrets**, written
+into `.env` by the deploy workflow (`deploy/apply-env.sh`) — set them under
+Settings → Secrets and variables → Actions and re-run the workflow; nobody
+edits the server by hand. Unset secrets are skipped, never blanked; a change
+that leaves the service unhealthy is rolled back.
+
 **Spend cap.** Cloudflare has no hard spending limit, so the server enforces one:
 every R2 (and Jev) call is estimated first and refused once the month's total
 would pass `SPEND_CAP_USD` (default 10). Estimates ignore Cloudflare's free

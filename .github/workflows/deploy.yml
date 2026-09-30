@@ -27,6 +27,13 @@ permissions:
 # is public. Settings > Secrets and variables > Actions > Variables:
 #   CA_URL, CA_FINGERPRINT, CA_PROVISIONER, DEPLOY_HOST, DEPLOY_USER
 # None of these are secrets; the fingerprint is what pins the CA.
+#
+# Server credentials are repository SECRETS (Settings > Secrets and variables >
+# Actions > Secrets) and are written into the server's .env on every run by
+# deploy/apply-env.sh - nobody edits the box by hand:
+#   R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY   transcripts
+#   CF_ACCOUNT_ID, CF_AI_TOKEN                                         Jev
+# An unset secret is skipped, never blanked.
 env:
   CA_URL: ${{ vars.CA_URL }}
   CA_FINGERPRINT: ${{ vars.CA_FINGERPRINT }}
@@ -45,10 +52,17 @@ jobs:
       # without a configured target still deploys. Skip rather than fail.
       - name: Check the deploy target is configured
         id: cfg
+        env:
+          ANY_SECRET: ${{ secrets.R2_ACCOUNT_ID }}${{ secrets.CF_AI_TOKEN }}
         run: |
           if [ -z "${CA_URL}" ] || [ -z "${CA_FINGERPRINT}" ] || [ -z "${DEPLOY_HOST}" ]; then
             echo "configured=false" >> "$GITHUB_OUTPUT"
             echo "::notice::No deploy target configured (repository variables CA_URL, CA_FINGERPRINT, DEPLOY_HOST). The host pulls origin/main on a timer, so this commit still deploys."
+            # The timer can pull code but never secrets - those only travel this way.
+            if [ -n "${ANY_SECRET}" ]; then
+              echo "::error::Server secrets are set but the deploy target is not, so they cannot reach the server. Add the repository variables CA_URL, CA_FINGERPRINT and DEPLOY_HOST."
+              exit 1
+            fi
           else
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
@@ -117,6 +131,31 @@ jobs:
 
           echo "--- certificate issued:"
           ssh-keygen -L -f ~/.ssh/id_ed25519-cert.pub | grep -E 'Type|Valid|Principals|Key ID' -A1 | head -12
+
+      # Before the code deploy, so a new commit that needs a new key starts with it.
+      # Values travel inside the SSH session's stdin (appended to the script as a
+      # heredoc): never on a command line, never echoed. GitHub also masks them.
+      - name: Apply server secrets
+        if: steps.cfg.outputs.configured == 'true'
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+          CF_AI_TOKEN: ${{ secrets.CF_AI_TOKEN }}
+        run: |
+          set -euo pipefail
+          ssh-keyscan -T 10 "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          {
+            cat deploy/apply-env.sh
+            for k in R2_ACCOUNT_ID R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY CF_ACCOUNT_ID CF_AI_TOKEN; do
+              v="${!k:-}"
+              if [ -n "$v" ]; then printf '%s=%s\n' "$k" "$v"; fi
+            done
+            echo __INHOUSE_ENV__
+          } | ssh -o BatchMode=yes -o StrictHostKeyChecking=yes \
+                -i ~/.ssh/id_ed25519 "${DEPLOY_USER}@${DEPLOY_HOST}" 'bash -s'
 
       - name: Deploy
         if: steps.cfg.outputs.configured == 'true'

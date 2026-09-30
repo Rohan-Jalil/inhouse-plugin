@@ -15,7 +15,7 @@ URL="http://127.0.0.1:4317${BASE_PATH}/api/health"
 # safe marker: it can advance without the service restarting (a manual pull, a
 # restart that failed), and then a checkout-vs-origin check skips forever while
 # the service keeps serving old code.
-STAMP="$HOME/REDACTED/deployed.sha"
+STAMP="${XDG_STATE_HOME:-$HOME/.local/state}/inhouse-plugin/deployed.sha"
 
 export NVM_DIR="$HOME/.nvm"
 # shellcheck disable=SC1091

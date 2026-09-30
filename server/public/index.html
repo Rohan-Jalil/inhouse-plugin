@@ -72,6 +72,32 @@ h1 { font-size: 20px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
 .filters button.on { background: var(--series-1); border-color: var(--series-1); color: #fff; }
 .filters .sep { width: 1px; height: 22px; background: var(--border-strong); margin: 0 2px; }
 
+/* multi-select dropdown: a <details> with a checkbox list */
+.ms { position: relative; }
+.ms > summary {
+  list-style: none; cursor: pointer; font-size: 13px; color: var(--text-primary);
+  background: var(--surface-1); border: 1px solid var(--border-strong); border-radius: 7px;
+  padding: 6px 26px 6px 9px; min-width: 150px; max-width: 230px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; position: relative;
+}
+.ms > summary::-webkit-details-marker { display: none; }
+.ms > summary::after { content: '▾'; position: absolute; right: 9px; top: 6px; color: var(--text-muted); }
+.ms > summary.active { border-color: var(--series-1); box-shadow: inset 0 0 0 1px var(--series-1); }
+.ms .panel {
+  position: absolute; z-index: 40; top: calc(100% + 4px); right: 0; min-width: 260px; max-width: 340px;
+  background: var(--surface-1); border: 1px solid var(--border-strong); border-radius: 9px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.16); padding: 6px;
+}
+.ms .panel .opts { max-height: 300px; overflow-y: auto; }
+.ms label { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.ms label:hover { background: var(--surface-2); }
+.ms label .n { margin-left: auto; color: var(--text-muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.ms label .sub2 { display: block; color: var(--text-muted); font-size: 11.5px; }
+.ms .actions { display: flex; justify-content: space-between; border-top: 1px solid var(--border); margin-top: 4px; padding: 6px 4px 2px; }
+.ms .actions button { font-size: 12px; padding: 4px 8px; }
+.ms .none { padding: 10px; color: var(--text-muted); font-size: 12.5px; }
+.chip-model { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 16px; }
 .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
 .tile .label { font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-muted); }
@@ -149,7 +175,8 @@ td.wrap-cell { white-space: normal; max-width: 460px; color: var(--text-secondar
       <input type="date" id="from" aria-label="From date">
       <input type="date" id="to" aria-label="To date">
       <span class="sep"></span>
-      <select id="dev-filter" aria-label="Filter by developer"><option value="">All developers</option></select>
+      <details class="ms" id="acct-filter"><summary aria-label="Filter by Claude account">All accounts</summary><div class="panel"></div></details>
+      <details class="ms" id="dev-filter"><summary aria-label="Filter by developer">All developers</summary><div class="panel"></div></details>
       <input type="search" id="q" placeholder="Search sessions…" aria-label="Search sessions">
       <form method="post" action="logout" style="margin:0"><button type="submit" title="Sign out">Sign out</button></form>
     </div>
@@ -206,7 +233,8 @@ td.wrap-cell { white-space: normal; max-width: 460px; color: var(--text-secondar
 const SERIES = ['--series-1','--series-2','--series-3','--series-4','--series-5','--series-6','--series-7','--series-8'];
 const cssVar = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 
-const state = { from: '', to: '', dev: '', q: '', open: null };
+// devs / accts: selected emails. Empty means "all".
+const state = { from: '', to: '', devs: new Set(), accts: new Set(), q: '', open: null };
 
 /* API calls are relative to wherever the page is served from, so the dashboard
    works at / and equally under a sub-path like /usage/ behind a shared vhost. */
@@ -385,7 +413,9 @@ function devTable(rows) {
     <thead><tr>
       <th>Developer</th><th>Claude account</th>
       <th class="num">Sessions</th><th class="num">Active days</th>
-      <th class="num">Sessions/day</th><th class="num">Tokens</th>
+      <th class="num">Sessions/day</th>
+      <th class="num" title="Input tokens">Read</th><th class="num" title="Output tokens">Write</th>
+      <th class="num">Cache write</th><th class="num">Cache read</th><th class="num">Total</th>
       <th class="num">Est. cost</th><th class="num">Machines</th><th>Last active</th>
     </tr></thead>
     <tbody>${rows.map((r) => `
@@ -397,7 +427,11 @@ function devTable(rows) {
         <td class="num">${nf.format(r.sessions)}</td>
         <td class="num">${nf.format(r.active_days)}</td>
         <td class="num">${(r.sessions / Math.max(1, r.active_days)).toFixed(1)}</td>
-        <td class="num">${tokens(r.total_tokens)}</td>
+        <td class="num">${tokens(r.input_tokens)}</td>
+        <td class="num">${tokens(r.output_tokens)}</td>
+        <td class="num">${tokens(r.cache_creation_tokens)}</td>
+        <td class="num">${tokens(r.cache_read_tokens)}</td>
+        <td class="num"><b>${tokens(r.total_tokens)}</b></td>
         <td class="num">${money(r.cost_usd)}</td>
         <td class="num">${r.machines > 1 ? `<span class="pill" title="More than one machine reported under this enrollment">${r.machines}</span>` : r.machines}</td>
         <td>${when(r.last_seen)}</td>
@@ -405,13 +439,17 @@ function devTable(rows) {
     </tbody>`;
 }
 
+const SESSION_COLS = 14;
 function sessionTable(rows) {
   const t = document.getElementById('session-table');
   if (!rows.length) { t.innerHTML = '<tbody><tr><td class="empty">No sessions match.</td></tr></tbody>'; return; }
   t.innerHTML = `
     <thead><tr>
-      <th>Started</th><th>Developer</th><th>Project</th><th>What the session was about</th>
-      <th class="num">Turns</th><th class="num">Tokens</th><th class="num">Est. cost</th><th class="num">Length</th><th></th>
+      <th>Started</th><th>Developer</th><th>Project</th><th>What the session was about</th><th>Model</th>
+      <th class="num">Turns</th>
+      <th class="num" title="Input tokens">Read</th><th class="num" title="Output tokens">Write</th>
+      <th class="num">Cache write</th><th class="num">Cache read</th><th class="num">Total</th>
+      <th class="num">Est. cost</th><th class="num">Length</th><th></th>
     </tr></thead>
     <tbody>${rows.map((s) => `
       <tr class="row-click" data-id="${esc(s.session_id)}">
@@ -419,8 +457,13 @@ function sessionTable(rows) {
         <td><span class="dev">${esc(s.developer_name || s.developer_email || '—')}</span></td>
         <td>${esc(s.project_name || '—')}${s.git_branch ? `<br><span class="mono" style="color:var(--text-muted)">${esc(s.git_branch)}</span>` : ''}</td>
         <td class="wrap-cell">${esc(s.headline || s.title || '—')}</td>
+        <td>${s.primary_model ? `<span class="chip-model">${esc(s.primary_model.replace(/^claude-/, ''))}</span>${s.model_count > 1 ? ` <span class="pill" title="This session used ${s.model_count} models; the one shown did most of the work">+${s.model_count - 1}</span>` : ''}` : '—'}</td>
         <td class="num">${nf.format(s.turns)}</td>
-        <td class="num">${tokens(s.total_tokens)}</td>
+        <td class="num">${tokens(s.input_tokens)}</td>
+        <td class="num">${tokens(s.output_tokens)}</td>
+        <td class="num">${tokens(s.cache_creation_tokens)}</td>
+        <td class="num">${tokens(s.cache_read_tokens)}</td>
+        <td class="num"><b>${tokens(s.total_tokens)}</b></td>
         <td class="num">${money(s.cost_usd)}</td>
         <td class="num">${dur(s.duration_sec)}</td>
         <td>${s.is_final ? '' : '<span class="pill live">live</span>'}</td>
@@ -439,11 +482,11 @@ async function toggleDetail(tr, id) {
 
   const row = document.createElement('tr');
   row.className = 'detail';
-  row.innerHTML = `<td colspan="9">Loading…</td>`;
+  row.innerHTML = `<td colspan="${SESSION_COLS}">Loading…</td>`;
   tr.after(row);
 
   const r = await fetch(api(`api/sessions/${encodeURIComponent(id)}`)).then((x) => x.json()).catch(() => null);
-  if (!r || r.error) { row.innerHTML = '<td colspan="9">Could not load this session.</td>'; return; }
+  if (!r || r.error) { row.innerHTML = `<td colspan="${SESSION_COLS}">Could not load this session.</td>`; return; }
 
   const s = r.session;
   const tools = Object.entries(r.tools).sort((a, b) => b[1] - a[1])
@@ -453,7 +496,7 @@ async function toggleDetail(tr, id) {
   ).join('<br>') || '—';
   const files = r.files.length ? r.files.map((f) => esc(f)).join('<br>') : '—';
 
-  row.innerHTML = `<td colspan="9"><dl class="kv">
+  row.innerHTML = `<td colspan="${SESSION_COLS}"><dl class="kv">
     <dt>Session</dt><dd class="mono">${esc(s.session_id)}</dd>
     <dt>Machine</dt><dd class="mono">${esc(s.os_user)}@${esc(s.hostname)} · ${esc(s.platform)} · Claude Code ${esc(s.cc_version || '?')}</dd>
     <dt>Claude account</dt><dd class="mono">${esc(s.account_email)}${s.account_org ? ` · ${esc(s.account_org)}` : ''}</dd>
@@ -471,7 +514,8 @@ async function toggleDetail(tr, id) {
 /* -------------------------------------------------------------------- load */
 function qs() {
   const p = new URLSearchParams({ from: state.from, to: state.to });
-  if (state.dev) p.set('developer', state.dev);
+  if (state.devs.size) p.set('developer', [...state.devs].join(','));
+  if (state.accts.size) p.set('account', [...state.accts].join(','));
   return p;
 }
 
@@ -504,13 +548,15 @@ async function load() {
   drawModels(document.getElementById('chart-models'), document.getElementById('model-legend'), overview.byModel);
   devTable(overview.byDeveloper);
 
-  // Keep the developer filter populated without clobbering the current choice.
-  const sel = document.getElementById('dev-filter');
-  const seen = new Map();
-  for (const r of overview.byDeveloper) if (r.developer_email) seen.set(r.developer_email, r.developer_name);
-  const want = ['<option value="">All developers</option>',
-    ...[...seen].map(([e, n]) => `<option value="${esc(e)}">${esc(n || e)}</option>`)].join('');
-  if (sel.innerHTML !== want) { sel.innerHTML = want; sel.value = state.dev; }
+  // Options come from the date range alone, so the lists never shrink to
+  // whatever is already selected.
+  const opts = await fetch(api(`api/filters?${new URLSearchParams({ from: state.from, to: state.to })}`)).then((r) => r.json());
+  renderMulti('dev-filter', 'developer', 'developers', opts.developers, state.devs);
+  renderMulti('acct-filter', 'account', 'accounts', opts.accounts, state.accts);
+  const parts = [];
+  if (state.accts.size) parts.push(`${state.accts.size} account${state.accts.size === 1 ? '' : 's'}`);
+  if (state.devs.size) parts.push(`${state.devs.size} developer${state.devs.size === 1 ? '' : 's'}`);
+  if (parts.length) document.getElementById('range-sub').textContent += ` · filtered to ${parts.join(' and ')}`;
 
   const p = qs();
   if (state.q) p.set('q', state.q);
@@ -520,6 +566,54 @@ async function load() {
     `${nf.format(list.sessions.length)} of ${nf.format(list.total)} shown`;
   sessionTable(list.sessions);
 }
+
+/* --------------------------------------------------------- multi-select */
+/** Renders a checkbox dropdown. `selected` is the live Set in `state`. */
+function renderMulti(id, noun, plural, options, selected) {
+  const root = document.getElementById(id);
+  const summary = root.querySelector('summary');
+  const panel = root.querySelector('.panel');
+  const labelOf = (v) => (options.find((o) => o.value === v) || {}).label || v;
+
+  summary.textContent = selected.size === 0 ? `All ${plural}`
+    : selected.size === 1 ? labelOf([...selected][0])
+    : `${selected.size} ${plural}`;
+  summary.classList.toggle('active', selected.size > 0);
+  summary.title = selected.size ? [...selected].map(labelOf).join(', ') : `All ${plural}`;
+
+  // Don't rebuild the list under the user's cursor while it is open.
+  if (root.open && panel.dataset.built) return;
+
+  // Keep a selected value visible even if it has no sessions in this range.
+  const all = [...options];
+  for (const v of selected) if (!all.some((o) => o.value === v)) all.push({ value: v, label: v, sessions: 0 });
+
+  panel.innerHTML = all.length === 0 ? `<div class="none">No ${plural} in this range.</div>` : `
+    <div class="opts">${all.map((o) => `
+      <label><input type="checkbox" value="${esc(o.value)}" ${selected.has(o.value) ? 'checked' : ''}>
+        <span>${esc(o.label || o.value)}${o.label && o.label !== o.value ? `<span class="sub2 mono">${esc(o.value)}</span>` : ''}</span>
+        <span class="n">${nf.format(o.sessions)}</span></label>`).join('')}</div>
+    <div class="actions"><button type="button" data-act="clear">Clear</button><button type="button" data-act="all">Select all</button></div>`;
+  panel.dataset.built = '1';
+
+  panel.querySelectorAll('input[type=checkbox]').forEach((cb) => cb.addEventListener('change', () => {
+    cb.checked ? selected.add(cb.value) : selected.delete(cb.value);
+    load();
+  }));
+  panel.querySelectorAll('button[data-act]').forEach((b) => b.addEventListener('click', () => {
+    if (b.dataset.act === 'clear') selected.clear();
+    else all.forEach((o) => selected.add(o.value));
+    panel.querySelectorAll('input[type=checkbox]').forEach((cb) => { cb.checked = selected.has(cb.value); });
+    load();
+  }));
+}
+
+// Close a dropdown when clicking elsewhere, and rebuild it fresh next time.
+document.addEventListener('click', (e) => {
+  document.querySelectorAll('details.ms[open]').forEach((d) => {
+    if (!d.contains(e.target)) { d.open = false; delete d.querySelector('.panel').dataset.built; }
+  });
+});
 
 /* ------------------------------------------------------------------ wiring */
 function setDays(n) {
@@ -546,7 +640,6 @@ for (const id of ['from', 'to']) {
     load();
   });
 }
-document.getElementById('dev-filter').addEventListener('change', (e) => { state.dev = e.target.value; load(); });
 let qTimer;
 document.getElementById('q').addEventListener('input', (e) => {
   clearTimeout(qTimer);
@@ -570,7 +663,9 @@ if (isDay(params.get('from')) || isDay(params.get('to'))) {
 } else {
   setDays(14);
 }
-if (params.get('developer')) state.dev = params.get('developer').toLowerCase();
+const listOf = (v) => (v || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
+listOf(params.get('developer')).forEach((v) => state.devs.add(v));
+listOf(params.get('account')).forEach((v) => state.accts.add(v));
 if (params.get('q')) { state.q = params.get('q'); document.getElementById('q').value = state.q; }
 load();
 </script>

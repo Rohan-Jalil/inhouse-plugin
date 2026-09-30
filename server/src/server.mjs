@@ -5,6 +5,7 @@
  *   GET  /api/overview      cards, developer x account rollup, per-day series
  *   GET  /api/sessions      filtered session list
  *   GET  /api/sessions/:id  one session with per-model + tool breakdown
+ *   GET  /api/filters       developers and accounts available in a date range
  *   GET  /                  dashboard
  */
 
@@ -205,6 +206,30 @@ function range(q) {
   return { from, to };
 }
 
+/** Values of a repeatable or comma-separated query param, e.g. ?developer=a,b&developer=c. */
+function listParam(v) {
+  const raw = Array.isArray(v) ? v : (v == null ? [] : [v]);
+  return [...new Set(raw.flatMap((x) => String(x).split(','))
+    .map((x) => x.trim().toLowerCase()).filter(Boolean))].slice(0, 100);
+}
+
+/**
+ * The dashboard's filter, as one WHERE clause every read query shares, so that
+ * picking developers or accounts changes every number on the page - not just
+ * the session list. `a` is the sessions table alias used by the caller.
+ */
+function sessionFilter(q, a = '') {
+  const col = (c) => (a ? `${a}.${c}` : c);
+  const { from, to } = range(q);
+  const where = [`${col('day')} BETWEEN ? AND ?`];
+  const args = [from, to];
+  const devs = listParam(q.developer);
+  const accts = listParam(q.account);
+  if (devs.length) { where.push(`${col('developer_email')} IN (${devs.map(() => '?').join(',')})`); args.push(...devs); }
+  if (accts.length) { where.push(`${col('account_email')} IN (${accts.map(() => '?').join(',')})`); args.push(...accts); }
+  return { from, to, sql: where.join(' AND '), args, devs, accts };
+}
+
 
 /* ------------------------------------------------------------------- login */
 
@@ -396,14 +421,14 @@ const SUMMARY_COLS = `
 `;
 
 app.get(`${BASE_PATH}/api/overview`, readLimiter, requireDashboardAuth, (req, res) => {
-  const { from, to } = range(req.query);
-  const args = [from, to];
+  const f = sessionFilter(req.query);
+  const fs = sessionFilter(req.query, 's');
 
   const totals = db.prepare(
     `SELECT ${SUMMARY_COLS},
             COUNT(DISTINCT developer_email) AS developers,
             COUNT(DISTINCT account_email)   AS accounts
-       FROM sessions WHERE day BETWEEN ? AND ?`).get(...args);
+       FROM sessions WHERE ${f.sql}`).get(...f.args);
 
   // The core question: who is on which Claude account, and how much did they use.
   const byDeveloper = db.prepare(
@@ -413,16 +438,16 @@ app.get(`${BASE_PATH}/api/overview`, readLimiter, requireDashboardAuth, (req, re
             COUNT(DISTINCT day)        AS active_days,
             MAX(last_activity_at)      AS last_seen,
             ${SUMMARY_COLS}
-       FROM sessions WHERE day BETWEEN ? AND ?
+       FROM sessions WHERE ${f.sql}
       GROUP BY developer_email, account_email
-      ORDER BY total_tokens DESC`).all(...args);
+      ORDER BY total_tokens DESC`).all(...f.args);
 
   const byDay = db.prepare(
     `SELECT day, developer_email, COUNT(*) AS sessions,
             COALESCE(SUM(total_tokens), 0) AS total_tokens,
             COALESCE(SUM(cost_usd), 0)     AS cost_usd
-       FROM sessions WHERE day BETWEEN ? AND ?
-      GROUP BY day, developer_email ORDER BY day`).all(...args);
+       FROM sessions WHERE ${f.sql}
+      GROUP BY day, developer_email ORDER BY day`).all(...f.args);
 
   const byModel = db.prepare(
     `SELECT m.model,
@@ -430,30 +455,51 @@ app.get(`${BASE_PATH}/api/overview`, readLimiter, requireDashboardAuth, (req, re
             SUM(m.input_tokens + m.output_tokens + m.cache_creation_tokens + m.cache_read_tokens) AS total_tokens,
             SUM(m.cost_usd) AS cost_usd
        FROM session_models m JOIN sessions s ON s.session_id = m.session_id
-      WHERE s.day BETWEEN ? AND ?
+      WHERE ${fs.sql}
       GROUP BY m.model
      -- Name the aggregate explicitly: the sessions table also has a
      -- total_tokens column, and a bare alias here binds to that instead.
      HAVING SUM(m.input_tokens + m.output_tokens + m.cache_creation_tokens + m.cache_read_tokens) > 0
-      ORDER BY total_tokens DESC`).all(...args);
+      ORDER BY total_tokens DESC`).all(...fs.args);
 
   const byProject = db.prepare(
     `SELECT project_name, COUNT(*) AS sessions,
             COALESCE(SUM(total_tokens), 0) AS total_tokens,
             COALESCE(SUM(cost_usd), 0)     AS cost_usd
-       FROM sessions WHERE day BETWEEN ? AND ? AND project_name != ''
-      GROUP BY project_name ORDER BY total_tokens DESC LIMIT 12`).all(...args);
+       FROM sessions WHERE ${f.sql} AND project_name != ''
+      GROUP BY project_name ORDER BY total_tokens DESC LIMIT 12`).all(...f.args);
 
-  res.json({ range: { from, to, tz: TZ }, totals, byDeveloper, byDay, byModel, byProject });
+  res.json({
+    range: { from: f.from, to: f.to, tz: TZ },
+    filter: { developers: f.devs, accounts: f.accts },
+    totals, byDeveloper, byDay, byModel, byProject,
+  });
+});
+
+/**
+ * Everything the filter dropdowns can offer for the date range, ignoring the
+ * developer/account selection itself - otherwise picking one developer would
+ * shrink the list to that developer and you could never add a second.
+ */
+app.get(`${BASE_PATH}/api/filters`, readLimiter, requireDashboardAuth, (req, res) => {
+  const { from, to } = range(req.query);
+  const developers = db.prepare(
+    `SELECT developer_email AS value, MAX(developer_name) AS label, COUNT(*) AS sessions
+       FROM sessions WHERE day BETWEEN ? AND ? AND developer_email != ''
+      GROUP BY developer_email ORDER BY label COLLATE NOCASE`).all(from, to);
+  const accounts = db.prepare(
+    `SELECT account_email AS value, MAX(account_display_name) AS label, COUNT(*) AS sessions
+       FROM sessions WHERE day BETWEEN ? AND ? AND account_email != ''
+      GROUP BY account_email ORDER BY account_email COLLATE NOCASE`).all(from, to);
+  res.json({ range: { from, to }, developers, accounts });
 });
 
 app.get(`${BASE_PATH}/api/sessions`, readLimiter, requireDashboardAuth, (req, res) => {
-  const { from, to } = range(req.query);
-  const where = ['day BETWEEN ? AND ?'];
-  const args = [from, to];
+  const f = sessionFilter(req.query);
+  const { from, to } = f;
+  const where = [f.sql];
+  const args = [...f.args];
 
-  if (req.query.developer) { where.push('developer_email = ?'); args.push(String(req.query.developer).toLowerCase()); }
-  if (req.query.account) { where.push('account_email = ?'); args.push(String(req.query.account).toLowerCase()); }
   if (req.query.project) { where.push('project_name = ?'); args.push(String(req.query.project)); }
   if (req.query.q) {
     where.push('(headline LIKE ? OR title LIKE ? OR first_prompt LIKE ? OR project_name LIKE ?)');
@@ -472,7 +518,14 @@ app.get(`${BASE_PATH}/api/sessions`, readLimiter, requireDashboardAuth, (req, re
             project_name, project_cwd, git_branch, started_at, last_activity_at, day,
             duration_sec, headline, title, turns, tool_calls,
             input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-            total_tokens, cost_usd, is_final, end_reason, report_count
+            total_tokens, cost_usd, is_final, end_reason, report_count,
+            -- The model that did most of the work, by cost, plus how many
+            -- others the session also touched.
+            (SELECT m.model FROM session_models m WHERE m.session_id = sessions.session_id
+               AND (m.input_tokens + m.output_tokens + m.cache_creation_tokens + m.cache_read_tokens) > 0
+             ORDER BY m.cost_usd DESC, m.requests DESC LIMIT 1) AS primary_model,
+            (SELECT COUNT(*) FROM session_models m WHERE m.session_id = sessions.session_id
+               AND (m.input_tokens + m.output_tokens + m.cache_creation_tokens + m.cache_read_tokens) > 0) AS model_count
        FROM sessions WHERE ${where.join(' AND ')}
       ORDER BY started_at DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
 

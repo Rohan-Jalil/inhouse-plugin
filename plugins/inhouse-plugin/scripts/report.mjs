@@ -577,11 +577,27 @@ async function main() {
   await flushSpool(cfg);
   if (!due) { writeJSONSafe(statePath, state); return; }
 
+  // Opened and closed with no conversation: Claude Code only creates the
+  // transcript with the first message, so there is nothing to report - and
+  // sending it would show up as an empty "No activity recorded" session.
+  const t = state.totals;
+  const hasActivity = state.turns > 0 || state.user_messages > 0 || t.requests > 0
+    || (t.input_tokens + t.output_tokens + t.cache_creation_tokens + t.cache_read_tokens) > 0
+    || Boolean(state.title || state.first_prompt);
+  if (!hasActivity) {
+    if (isFinal) { try { fs.unlinkSync(statePath); } catch {} } else writeJSONSafe(statePath, state);
+    return;
+  }
+
   const acc = claudeAccount();
   const cwd = state.cwd || hook.cwd || process.cwd();
   const payload = {
     schema: 1,
     event,
+    // SessionStart source: startup | resume | clear | compact. A resume keeps
+    // the session id, so the server counts these to show how often a session
+    // was picked back up.
+    start_source: event === 'SessionStart' ? String(hook.source || '') : undefined,
     session_id: sessionId,
     end_reason: isFinal ? (hook.reason || 'end') : null,
     is_final: isFinal,

@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url';
 import fs from 'node:fs';
 import zlib from 'node:zlib';
 import { renderTranscript } from './transcript-view.mjs';
-import { openDb, makeStore } from './db.mjs';
+import { openDb, makeStore, EMPTY_SESSION_SQL } from './db.mjs';
 import { loadPricing } from './pricing.mjs';
 import { makeStorage } from './storage.mjs';
 import { makeBudget } from './budget.mjs';
@@ -420,8 +420,19 @@ app.post(`${BASE_PATH}/api/ingest`, ingestLimiter, requireIngestAuth,
   row.total_tokens = row.input_tokens + row.output_tokens
     + row.cache_creation_tokens + row.cache_read_tokens;
 
+  // Opened and closed with no conversation (no transcript yet, nothing done).
+  // Older plugins still send these; accept with 200 so they don't retry, but
+  // store nothing.
+  const empty = row.turns === 0 && row.user_messages === 0 && row.requests === 0
+    && row.total_tokens === 0 && !row.title && !row.first_prompt;
+  if (empty) return res.json({ ok: true, session_id: row.session_id, ignored: 'empty session' });
+
+  const start = b.event === 'SessionStart'
+    ? { at: str(b.timing?.reported_at, 40) || new Date().toISOString(), source: str(b.start_source, 30) }
+    : null;
+
   try {
-    store.save(row, models);
+    store.save(row, models, start);
   } catch (e) {
     console.error('[ingest] save failed', e.message);
     return res.status(500).json({ error: 'save failed' });
@@ -460,10 +471,13 @@ app.get(`${BASE_PATH}/api/overview`, readLimiter, requireDashboardAuth, (req, re
             COUNT(DISTINCT machine_id) AS machines,
             COUNT(DISTINCT day)        AS active_days,
             MAX(last_activity_at)      AS last_seen,
+            (SELECT COUNT(*) FROM session_starts st JOIN sessions s2 ON s2.session_id = st.session_id
+              WHERE st.source = 'resume' AND s2.developer_email = sessions.developer_email
+                AND s2.account_email = sessions.account_email AND s2.day BETWEEN ? AND ?) AS resumes,
             ${SUMMARY_COLS}
        FROM sessions WHERE ${f.sql}
       GROUP BY developer_email, account_email
-      ORDER BY total_tokens DESC`).all(...f.args);
+      ORDER BY total_tokens DESC`).all(f.from, f.to, ...f.args); // resume subquery's range first
 
   const byDay = db.prepare(
     `SELECT day, developer_email, COUNT(*) AS sessions,
@@ -582,7 +596,8 @@ app.get(`${BASE_PATH}/api/sessions`, readLimiter, requireDashboardAuth, (req, re
             (SELECT COUNT(*) FROM session_models m WHERE m.session_id = sessions.session_id
                AND (m.input_tokens + m.output_tokens + m.cache_creation_tokens + m.cache_read_tokens) > 0) AS model_count,
             j.requested_model AS jev_requested, j.recommended_tier AS jev_tier, j.chosen_model AS jev_chosen,
-            j.applied AS jev_applied, j.confidence AS jev_confidence, j.reason AS jev_reason
+            j.applied AS jev_applied, j.confidence AS jev_confidence, j.reason AS jev_reason,
+            (SELECT COUNT(*) FROM session_starts st WHERE st.session_id = sessions.session_id AND st.source = 'resume') AS resumes
        FROM sessions LEFT JOIN jev_decisions j USING (session_id)
       WHERE ${where.join(' AND ')}
       ORDER BY started_at DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
@@ -599,7 +614,8 @@ app.get(`${BASE_PATH}/api/sessions/:id`, readLimiter, requireDashboardAuth, (req
   try { tools = JSON.parse(s.tools_json); } catch {}
   try { files = JSON.parse(s.files_json); } catch {}
   const decision = db.prepare('SELECT * FROM jev_decisions WHERE session_id = ?').get(req.params.id) || null;
-  res.json({ session: s, models, tools, files, jev: decision });
+  const starts = db.prepare('SELECT started_at, source, inferred FROM session_starts WHERE session_id = ? ORDER BY started_at').all(req.params.id);
+  res.json({ session: s, models, tools, files, jev: decision, starts });
 });
 
 /* ------------------------------------------------------------ transcripts */

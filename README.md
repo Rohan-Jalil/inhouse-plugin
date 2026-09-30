@@ -119,6 +119,18 @@ Put TLS in front of it, and keep it off the open internet if you can — reports
 contain prompt text. `BASE_PATH` mounts it under a sub-path behind a shared
 vhost.
 
+**Resumes.** `claude --resume`, `--continue` and `/resume` keep the session id,
+and each one fires SessionStart with `source=resume`. The server records every
+start in `session_starts`; the dashboard shows the count per session and per
+developer. Plugins before 1.3.0 don't send the source, so a start arriving for
+an already-ended session is counted as a resume and marked *inferred*.
+
+**Empty sessions.** Claude Code only writes a transcript with the first
+message, so a session opened and closed without a prompt has nothing in it.
+The plugin (1.3.0+) no longer reports these, the server ignores them from
+older plugins, and a one-time migration removed the ones already stored
+(backing up the database first).
+
 ## Accuracy
 
 Three things this gets right that a naive reader would not:

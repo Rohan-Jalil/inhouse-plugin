@@ -423,7 +423,7 @@ function devTable(rows) {
       <th class="num">Sessions/day</th>
       <th class="num" title="Input tokens">Read</th><th class="num" title="Output tokens">Write</th>
       <th class="num">Cache write</th><th class="num">Cache read</th><th class="num">Total</th>
-      <th class="num">Est. cost</th><th class="num">Machines</th><th>Last active</th>
+      <th class="num">Est. cost</th><th class="num" title="Session resumes (claude --resume / --continue / /resume)">Resumes</th><th class="num">Machines</th><th>Last active</th>
     </tr></thead>
     <tbody>${rows.map((r) => `
       <tr>
@@ -440,13 +440,14 @@ function devTable(rows) {
         <td class="num">${tokens(r.cache_read_tokens)}</td>
         <td class="num"><b>${tokens(r.total_tokens)}</b></td>
         <td class="num">${money(r.cost_usd)}</td>
+        <td class="num">${nf.format(r.resumes || 0)}</td>
         <td class="num">${r.machines > 1 ? `<span class="pill" title="More than one machine reported under this enrollment">${r.machines}</span>` : r.machines}</td>
         <td>${when(r.last_seen)}</td>
       </tr>`).join('')}
     </tbody>`;
 }
 
-const SESSION_COLS = 15;
+const SESSION_COLS = 16;
 const short = (m) => String(m || '').replace(/^claude-/, '');
 /** Jev cell: what it chose, and whether that was applied. */
 function jevCell(s) {
@@ -465,7 +466,8 @@ function sessionTable(rows) {
       <th class="num">Turns</th>
       <th class="num" title="Input tokens">Read</th><th class="num" title="Output tokens">Write</th>
       <th class="num">Cache write</th><th class="num">Cache read</th><th class="num">Total</th>
-      <th class="num">Est. cost</th><th class="num">Length</th><th></th>
+      <th class="num">Est. cost</th><th class="num">Length</th>
+      <th class="num" title="Times this session was picked back up with claude --resume, --continue or /resume">Resumed</th><th></th>
     </tr></thead>
     <tbody>${rows.map((s) => `
       <tr class="row-click" data-id="${esc(s.session_id)}">
@@ -483,6 +485,7 @@ function sessionTable(rows) {
         <td class="num"><b>${tokens(s.total_tokens)}</b></td>
         <td class="num">${money(s.cost_usd)}</td>
         <td class="num">${dur(s.duration_sec)}</td>
+        <td class="num">${s.resumes ? `<span class="pill" title="Resumed ${s.resumes} time${s.resumes === 1 ? '' : 's'}">×${s.resumes}</span>` : '<span style="color:var(--text-muted)">—</span>'}</td>
         <td>${s.is_final ? '' : '<span class="pill live">live</span>'}</td>
       </tr>`).join('')}
     </tbody>`;
@@ -535,6 +538,11 @@ async function toggleDetail(tr, id) {
     <dt>Tools</dt><dd>${tools}</dd>
     <dt>Files touched</dt><dd class="mono">${files}</dd>
     <dt>Transcript</dt><dd class="mono">${transcript}</dd>
+    <dt>Resumed</dt><dd>${(() => {
+      const res = (r.starts || []).filter((x) => x.source === 'resume');
+      if (!res.length) return 'never';
+      return `${res.length} time${res.length === 1 ? '' : 's'}: ` + res.map((x) => `${when(x.started_at)}${x.inferred ? ' <span class="pill" title="Reported by a plugin older than 1.3.0; deduced from a start after the session had ended">inferred</span>' : ''}`).join(', ');
+    })()}</dd>
     <dt>Jev</dt><dd>${r.jev ? `${r.jev.applied ? `rerouted ${esc(short(r.jev.requested_model))} → <b>${esc(short(r.jev.chosen_model))}</b>` : `kept ${esc(short(r.jev.requested_model))}`}
       · ${esc(r.jev.reason)}${r.jev.recommended_tier ? ` · recommended ${esc(r.jev.recommended_tier)} at ${Number(r.jev.confidence).toFixed(2)}` : ''}` : 'no decision (routing off for this machine, or session predates Jev)'}</dd>
     <dt>Reports</dt><dd>${nf.format(s.report_count)} · ${s.is_final ? `ended (${esc(s.end_reason || 'end')})` : 'still open or ended without a final report'}</dd>

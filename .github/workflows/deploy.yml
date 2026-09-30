@@ -35,12 +35,13 @@ permissions:
 #   CF_ACCOUNT_ID, CF_AI_TOKEN                                         Jev
 #   CF_AIG_GATEWAY_ID, CF_AIG_TOKEN            optional: non-default / authenticated gateway
 # An unset secret is skipped, never blanked.
+# Each may also be stored as a secret instead (then it shows as *** in logs).
 env:
-  CA_URL: ${{ vars.CA_URL }}
-  CA_FINGERPRINT: ${{ vars.CA_FINGERPRINT }}
-  CA_PROVISIONER: ${{ vars.CA_PROVISIONER || 'github' }}
-  DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
-  DEPLOY_USER: ${{ vars.DEPLOY_USER || 'deploy' }}
+  CA_URL: ${{ vars.CA_URL || secrets.CA_URL }}
+  CA_FINGERPRINT: ${{ vars.CA_FINGERPRINT || secrets.CA_FINGERPRINT }}
+  CA_PROVISIONER: ${{ vars.CA_PROVISIONER || secrets.CA_PROVISIONER || 'github' }}
+  DEPLOY_HOST: ${{ vars.DEPLOY_HOST || secrets.DEPLOY_HOST }}
+  DEPLOY_USER: ${{ vars.DEPLOY_USER || secrets.DEPLOY_USER || 'deploy' }}
 
 jobs:
   deploy:
@@ -61,7 +62,7 @@ jobs:
             echo "::notice::No deploy target configured (repository variables CA_URL, CA_FINGERPRINT, DEPLOY_HOST). The host pulls origin/main on a timer, so this commit still deploys."
             # The timer can pull code but never secrets - those only travel this way.
             if [ -n "${ANY_SECRET}" ]; then
-              echo "::error::Server secrets are set but the deploy target is not, so they cannot reach the server. Add the repository variables CA_URL, CA_FINGERPRINT and DEPLOY_HOST."
+              echo "::error::Server secrets are set but the deploy target is not, so they cannot reach the server. Add CA_URL, CA_FINGERPRINT and DEPLOY_HOST (as repository variables or secrets)."
               exit 1
             fi
           else

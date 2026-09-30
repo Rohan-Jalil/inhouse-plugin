@@ -104,8 +104,10 @@ every R2 (and Jev) call is estimated first and refused once the month's total
 would pass `SPEND_CAP_USD` (default 10). Estimates ignore Cloudflare's free
 allowances, so the real bill is at or below the figure shown.
 
-**Jev** runs on Cloudflare Workers AI when `CF_ACCOUNT_ID` and `CF_AI_TOKEN`
-are set; see `.env.example` for the confidence threshold and whether upgrades
+**Jev** runs on Cloudflare (`POST /accounts/{id}/ai/run`, model `typesafe/jev`)
+when `CF_ACCOUNT_ID` and `CF_AI_TOKEN` (Account › Workers AI › Read) are set.
+It is a third-party model billed through AI Gateway Unified Billing, so the
+account needs prepaid AI Gateway credits; see `.env.example` for the confidence threshold and whether upgrades
 are allowed. Without them `/api/route` answers "not configured" and every
 request passes through unchanged.
 

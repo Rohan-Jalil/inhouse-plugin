@@ -2,6 +2,14 @@
  * Model routing with Jev (TypeSafe's decision model, run on Cloudflare
  * Workers AI).
  *
+ * Jev is a third-party model: Cloudflare runs it through the account's AI
+ * Gateway and bills it via Unified Billing, so the account needs prepaid AI
+ * Gateway credits. The call is Cloudflare's model-agnostic REST endpoint,
+ *   POST /accounts/{id}/ai/run   { "model": "typesafe/jev", "input": {...} }
+ * authenticated with an API token that has Account > Workers AI > Read.
+ * CF_AIG_GATEWAY_ID picks a gateway other than the default; CF_AIG_TOKEN is
+ * sent as cf-aig-authorization for a gateway with authentication turned on.
+ *
  * The plugin's local proxy asks this server once per Claude Code session,
  * with the session's first prompt, which model should handle it. Jev answers
  * one Choice question; policy here decides whether that answer is applied:
@@ -46,6 +54,8 @@ const MAX_PROMPT_CHARS = 24_000;
 export function makeJev(db, budget, env = process.env) {
   const accountId = env.CF_ACCOUNT_ID || '';
   const token = env.CF_AI_TOKEN || '';
+  const gatewayId = env.CF_AIG_GATEWAY_ID || '';
+  const gatewayToken = env.CF_AIG_TOKEN || '';
   const enabled = Boolean(accountId && token);
   const base = (env.CF_AI_BASE_URL || 'https://api.cloudflare.com/client/v4').replace(/\/+$/, '');
   const model = env.JEV_MODEL || 'typesafe/jev';
@@ -115,16 +125,24 @@ export function makeJev(db, budget, env = process.env) {
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
     const started = Date.now();
     try {
-      const res = await fetch(`${base}/accounts/${encodeURIComponent(accountId)}/ai/run/${model}`, {
+      const res = await fetch(`${base}/accounts/${encodeURIComponent(accountId)}/ai/run`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${token}`,
+          ...(gatewayId ? { 'cf-aig-gateway-id': gatewayId } : {}),
+          ...(gatewayToken ? { 'cf-aig-authorization': `Bearer ${gatewayToken}` } : {}),
+        },
         body: JSON.stringify({
-          state: prompt,
-          questions: {
-            tier: {
-              type: 'choice',
-              instructions: INSTRUCTIONS,
-              criteria: Object.fromEntries(Object.keys(models).map((t) => [t, CRITERIA[t]])),
+          model,
+          input: {
+            state: prompt,
+            questions: {
+              tier: {
+                type: 'choice',
+                instructions: INSTRUCTIONS,
+                criteria: Object.fromEntries(Object.keys(models).map((t) => [t, CRITERIA[t]])),
+              },
             },
           },
         }),
@@ -135,8 +153,13 @@ export function makeJev(db, budget, env = process.env) {
         const msg = body.errors?.[0]?.message || `HTTP ${res.status}`;
         throw new Error(`Jev call failed: ${msg}`);
       }
-      const r = body.result || body;
-      return { answer: r.answers?.tier, usage: r.usage || {}, version: r.model || '', latency: Date.now() - started };
+      // Cloudflare's envelope has varied ({result: {...}} for Workers AI,
+      // {result: {...}, usage, model} on the gateway REST API); take the
+      // innermost object that carries the answers.
+      const layers = [body.result?.result, body.result, body].filter(Boolean);
+      const r = layers.find((x) => x.answers) || {};
+      const usage = r.usage || body.result?.usage || body.usage || {};
+      return { answer: r.answers?.tier, usage, version: r.model || body.result?.model || '', latency: Date.now() - started };
     } finally { clearTimeout(timer); }
   }
 

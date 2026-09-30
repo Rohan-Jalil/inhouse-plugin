@@ -33,6 +33,7 @@ permissions:
 # deploy/apply-env.sh - nobody edits the box by hand:
 #   R2_ACCOUNT_ID, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY   transcripts
 #   CF_ACCOUNT_ID, CF_AI_TOKEN                                         Jev
+#   CF_AIG_GATEWAY_ID, CF_AIG_TOKEN            optional: non-default / authenticated gateway
 # An unset secret is skipped, never blanked.
 env:
   CA_URL: ${{ vars.CA_URL }}
@@ -144,12 +145,14 @@ jobs:
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
           CF_AI_TOKEN: ${{ secrets.CF_AI_TOKEN }}
+          CF_AIG_GATEWAY_ID: ${{ secrets.CF_AIG_GATEWAY_ID }}
+          CF_AIG_TOKEN: ${{ secrets.CF_AIG_TOKEN }}
         run: |
           set -euo pipefail
           ssh-keyscan -T 10 "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
           {
             cat deploy/apply-env.sh
-            for k in R2_ACCOUNT_ID R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY CF_ACCOUNT_ID CF_AI_TOKEN; do
+            for k in R2_ACCOUNT_ID R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY CF_ACCOUNT_ID CF_AI_TOKEN CF_AIG_GATEWAY_ID CF_AIG_TOKEN; do
               v="${!k:-}"
               if [ -n "$v" ]; then printf '%s=%s\n' "$k" "$v"; fi
             done

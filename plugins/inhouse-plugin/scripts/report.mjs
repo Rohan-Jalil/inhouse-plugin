@@ -189,7 +189,35 @@ function emptyState(sessionId) {
     git_branch: '',
     cc_version: '',
     last_sent_at: 0,
+    // One entry per time Claude Code ran this session: the first launch, then
+    // one per resume (--resume / --continue / /resume keep the session id and
+    // append to the same transcript). Claude Code writes a "cost-state" line
+    // when a run exits, which is where one run ends and the next begins.
+    runs: [],
   };
+}
+
+const MAX_RUNS = 200;
+const usageTokens = (u) => (u.input_tokens || 0) + (u.output_tokens || 0)
+  + (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
+
+/** The run in progress, opening a new one if the last has ended. */
+function openRun(state, ts) {
+  state.runs ??= [];
+  let r = state.runs[state.runs.length - 1];
+  if (!r || r.closed) {
+    r = { started_at: ts, ended_at: ts, prompts: 0, turns: 0, tokens: 0, closed: false };
+    state.runs.push(r);
+    if (state.runs.length > MAX_RUNS) state.runs.splice(1, 1); // keep the first run and the most recent
+  }
+  return r;
+}
+
+/** Run that was active at `ts` (subagent work is attributed by time). */
+function runAt(state, ts) {
+  const runs = state.runs || [];
+  for (let i = runs.length - 1; i >= 0; i--) if (!ts || runs[i].started_at <= ts) return runs[i];
+  return runs[0];
 }
 
 const earlier = (a, b) => (!a ? b : (!b ? a : (a < b ? a : b)));
@@ -236,6 +264,13 @@ function foldFile(state, filePath, key, primary) {
     if (d.timestamp) {
       state.started_at = earlier(state.started_at, d.timestamp);
       state.last_activity_at = later(state.last_activity_at, d.timestamp);
+      if (primary) { const r = openRun(state, d.timestamp); r.ended_at = later(r.ended_at, d.timestamp); }
+    }
+    // A run exited. Untimestamped, so the run's end is its last timed entry.
+    if (primary && d.type === 'cost-state') {
+      const r = state.runs?.[state.runs.length - 1];
+      if (r && !r.closed) r.closed = true;
+      continue;
     }
     if (primary) {
       if (d.cwd) state.cwd = d.cwd;
@@ -257,6 +292,7 @@ function foldFile(state, filePath, key, primary) {
           : Array.isArray(c) ? c.filter((b) => b.type === 'text').map((b) => b.text).join(' ') : '';
         if (!body || body.startsWith('<')) break;
         state.user_messages += 1;
+        if (state.runs?.length) state.runs[state.runs.length - 1].prompts += 1;
         if (!state.first_prompt) state.first_prompt = truncate(body, MAX_PROMPT_CHARS);
         break;
       }
@@ -285,6 +321,8 @@ function foldFile(state, filePath, key, primary) {
         state.by_model[model] ??= EMPTY_TOTALS();
         addUsage(state.by_model[model], u);
         if (primary && !d.isSidechain) state.turns += 1; else state.sidechain_requests += 1;
+        const run = primary ? state.runs?.[state.runs.length - 1] : runAt(state, d.timestamp);
+        if (run) { run.tokens += usageTokens(u); if (primary && !d.isSidechain) run.turns += 1; }
         break;
       }
     }
@@ -638,6 +676,8 @@ async function main() {
       total: state.totals,
       by_model: state.by_model,
     },
+    runs: (state.runs || []).map(({ started_at, ended_at, prompts, turns, tokens, closed }) =>
+      ({ started_at, ended_at, prompts, turns, tokens, closed })),
   };
 
   const result = await postJSON(cfg, payload);

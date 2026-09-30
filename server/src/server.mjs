@@ -431,8 +431,14 @@ app.post(`${BASE_PATH}/api/ingest`, ingestLimiter, requireIngestAuth,
     ? { at: str(b.timing?.reported_at, 40) || new Date().toISOString(), source: str(b.start_source, 30) }
     : null;
 
+  const end = b.is_final ? { at: str(b.timing?.reported_at, 40) || new Date().toISOString(), reason: row.end_reason } : null;
+  const runs = Array.isArray(b.runs) ? b.runs.slice(0, 200).map((r) => ({
+    started_at: str(r?.started_at, 40), ended_at: str(r?.ended_at, 40),
+    prompts: int(r?.prompts), turns: int(r?.turns), tokens: int(r?.tokens), closed: r?.closed === true,
+  })).filter((r) => r.started_at) : null;
+
   try {
-    store.save(row, models, start);
+    store.save(row, models, start, end, runs);
   } catch (e) {
     console.error('[ingest] save failed', e.message);
     return res.status(500).json({ error: 'save failed' });
@@ -471,8 +477,10 @@ app.get(`${BASE_PATH}/api/overview`, readLimiter, requireDashboardAuth, (req, re
             COUNT(DISTINCT machine_id) AS machines,
             COUNT(DISTINCT day)        AS active_days,
             MAX(last_activity_at)      AS last_seen,
-            (SELECT COUNT(*) FROM session_starts st JOIN sessions s2 ON s2.session_id = st.session_id
-              WHERE st.source = 'resume' AND s2.developer_email = sessions.developer_email
+            (SELECT COALESCE(SUM(MAX(s2.runs_count - 1,
+                      (SELECT COUNT(*) FROM session_starts st WHERE st.session_id = s2.session_id AND st.source = 'resume'), 0)), 0)
+               FROM sessions s2
+              WHERE s2.developer_email = sessions.developer_email
                 AND s2.account_email = sessions.account_email AND s2.day BETWEEN ? AND ?) AS resumes,
             ${SUMMARY_COLS}
        FROM sessions WHERE ${f.sql}
@@ -597,7 +605,7 @@ app.get(`${BASE_PATH}/api/sessions`, readLimiter, requireDashboardAuth, (req, re
                AND (m.input_tokens + m.output_tokens + m.cache_creation_tokens + m.cache_read_tokens) > 0) AS model_count,
             j.requested_model AS jev_requested, j.recommended_tier AS jev_tier, j.chosen_model AS jev_chosen,
             j.applied AS jev_applied, j.confidence AS jev_confidence, j.reason AS jev_reason,
-            (SELECT COUNT(*) FROM session_starts st WHERE st.session_id = sessions.session_id AND st.source = 'resume') AS resumes
+            MAX(runs_count - 1, (SELECT COUNT(*) FROM session_starts st WHERE st.session_id = sessions.session_id AND st.source = 'resume'), 0) AS resumes
        FROM sessions LEFT JOIN jev_decisions j USING (session_id)
       WHERE ${where.join(' AND ')}
       ORDER BY started_at DESC LIMIT ? OFFSET ?`).all(...args, limit, offset);
@@ -615,7 +623,9 @@ app.get(`${BASE_PATH}/api/sessions/:id`, readLimiter, requireDashboardAuth, (req
   try { files = JSON.parse(s.files_json); } catch {}
   const decision = db.prepare('SELECT * FROM jev_decisions WHERE session_id = ?').get(req.params.id) || null;
   const starts = db.prepare('SELECT started_at, source, inferred FROM session_starts WHERE session_id = ? ORDER BY started_at').all(req.params.id);
-  res.json({ session: s, models, tools, files, jev: decision, starts });
+  const ends = db.prepare('SELECT ended_at, reason FROM session_ends WHERE session_id = ? ORDER BY ended_at').all(req.params.id);
+  let runs = []; try { runs = JSON.parse(s.runs_json || '[]'); } catch {}
+  res.json({ session: s, models, tools, files, jev: decision, starts, ends, runs });
 });
 
 /* ------------------------------------------------------------ transcripts */

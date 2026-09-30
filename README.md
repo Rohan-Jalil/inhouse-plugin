@@ -125,6 +125,15 @@ start in `session_starts`; the dashboard shows the count per session and per
 developer. Plugins before 1.3.0 don't send the source, so a start arriving for
 an already-ended session is counted as a resume and marked *inferred*.
 
+**Timeline.** Claude Code writes a `cost-state` line each time a run of a
+session exits, so the plugin (1.4.0+) splits the transcript into runs — first
+launch, then one per resume — with each run's start, end, prompts, turns and
+tokens (subagent work attributed by time). Rebuilt from the whole transcript,
+so a session's earlier runs appear as soon as it reports again. The session
+detail draws them as a waterfall on the session's own time axis, with idle
+gaps and how each run ended (from the SessionEnd reason, now recorded in
+`session_ends`).
+
 **Empty sessions.** Claude Code only writes a transcript with the first
 message, so a session opened and closed without a prompt has nothing in it.
 The plugin (1.3.0+) no longer reports these, the server ignores them from

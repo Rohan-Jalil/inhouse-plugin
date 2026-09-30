@@ -112,6 +112,15 @@ CREATE TABLE IF NOT EXISTS session_starts (
   PRIMARY KEY (session_id, started_at)
 );
 
+-- One row per time a session ended (SessionEnd hook), with Claude Code's reason:
+-- other, prompt_input_exit, clear, logout, resume (left for another session).
+CREATE TABLE IF NOT EXISTS session_ends (
+  session_id  TEXT NOT NULL,
+  ended_at    TEXT NOT NULL,
+  reason      TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (session_id, ended_at)
+);
+
 -- One-off data fixes, applied once at startup and recorded here.
 CREATE TABLE IF NOT EXISTS migrations (
   name        TEXT PRIMARY KEY,
@@ -141,6 +150,12 @@ export const EMPTY_SESSION_SQL = `turns = 0 AND user_messages = 0 AND requests =
   AND total_tokens = 0 AND title = '' AND first_prompt = ''`;
 
 function runMigrations(db, file) {
+  // Columns added after the first release. CREATE TABLE IF NOT EXISTS never
+  // alters an existing table, so add them here.
+  const cols = new Set(db.prepare('PRAGMA table_info(sessions)').all().map((c) => c.name));
+  if (!cols.has('runs_json')) db.exec("ALTER TABLE sessions ADD COLUMN runs_json TEXT NOT NULL DEFAULT ''");
+  if (!cols.has('runs_count')) db.exec('ALTER TABLE sessions ADD COLUMN runs_count INTEGER NOT NULL DEFAULT 0');
+
   const done = (name) => db.prepare('SELECT 1 FROM migrations WHERE name = ?').get(name);
   const mark = (name, detail) => db.prepare('INSERT INTO migrations (name, applied_at, detail) VALUES (?, ?, ?)')
     .run(name, new Date().toISOString(), detail);
@@ -261,6 +276,9 @@ export function makeStore(db) {
   // report must not reopen an ended session). A start is the one event that
   // genuinely reopens it - a resume - so it clears the flag explicitly.
   const reopen = db.prepare("UPDATE sessions SET is_final = 0, end_reason = '' WHERE session_id = ?");
+  const addEnd = db.prepare('INSERT OR IGNORE INTO session_ends (session_id, ended_at, reason) VALUES (?, ?, ?)');
+  const getRuns = db.prepare('SELECT runs_count FROM sessions WHERE session_id = ?');
+  const setRuns = db.prepare('UPDATE sessions SET runs_json = ?, runs_count = ? WHERE session_id = ?');
 
   return {
     /**
@@ -268,7 +286,7 @@ export function makeStore(db) {
      * Plugins older than 1.3.0 don't send the source, so a start arriving for
      * a session that had already ended is recorded as an (inferred) resume.
      */
-    save(row, models, start = null) {
+    save(row, models, start = null, end = null, runs = null) {
       const tx = () => {
         if (start) {
           let { source } = start; let inferred = 0;
@@ -292,6 +310,14 @@ export function makeStore(db) {
           row.is_final, row.end_reason, row.last_seen_at, row.last_seen_at,
         );
         if (start) reopen.run(row.session_id);
+        if (end) addEnd.run(row.session_id, end.at, end.reason || '');
+        // Runs are rebuilt from the whole transcript whenever the plugin starts
+        // fresh, so a later report never has fewer - unless it is a late,
+        // out-of-order one. Keep whichever list is longer.
+        if (Array.isArray(runs) && runs.length) {
+          const have = getRuns.get(row.session_id)?.runs_count || 0;
+          if (runs.length >= have) setRuns.run(JSON.stringify(runs), runs.length, row.session_id);
+        }
         for (const m of models) {
           upsertModel.run(
             row.session_id, m.model, m.requests, m.input_tokens, m.output_tokens,
